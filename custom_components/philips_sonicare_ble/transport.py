@@ -407,10 +407,21 @@ class EspBridgeTransport(SonicareTransport):
         self._last_uptime: int | None = None
         self._boot_time: datetime | None = None
         self._last_seen: datetime | None = None
+        self._rssi: int | None = None
 
     @property
     def connection_path(self) -> str | None:
         return self._device_name if self._esp_alive else None
+
+    @property
+    def connection_rssi(self) -> int | None:
+        """RSSI of the brush as seen by THIS bridge's BLE controller.
+
+        Sourced from ``esp_ble_gap_read_rssi`` on the firmware side, sampled
+        once per ~15 s heartbeat while connected. ``None`` when the bridge
+        isn't currently holding the link.
+        """
+        return self._rssi if self._device_connected else None
 
     def _svc_name(self, action: str) -> str:
         return bridge_service_name(self._device_name, action, self._esp_bridge_id)
@@ -639,6 +650,12 @@ class EspBridgeTransport(SonicareTransport):
                         self._hass.async_create_task(
                             self.set_auto_connect(self._desired_auto_connect)
                         )
+                rssi_str = event.data.get("rssi")
+                if rssi_str is not None:
+                    try:
+                        self._rssi = int(rssi_str)
+                    except (TypeError, ValueError):
+                        pass
                 if self._pending_info and not self._pending_info.done():
                     self._pending_info.set_result(dict(event.data))
             elif status == "heartbeat":
@@ -646,6 +663,13 @@ class EspBridgeTransport(SonicareTransport):
                 self._device_connected = ble_connected
                 if not ble_connected:
                     self._cancel_pending_reads()
+                    self._rssi = None
+                rssi_str = event.data.get("rssi")
+                if rssi_str is not None:
+                    try:
+                        self._rssi = int(rssi_str)
+                    except (TypeError, ValueError):
+                        pass
             elif status == "ready":
                 # Only mark device connected after GATT discovery is
                 # complete ("ready"), not on "connected" (GATT_OPEN_EVT)
@@ -663,6 +687,7 @@ class EspBridgeTransport(SonicareTransport):
             elif status == "disconnected":
                 self._device_connected = False
                 self._cancel_pending_reads()
+                self._rssi = None
 
             # Fire callback when any component of state changed
             if self._disconnect_cb and (

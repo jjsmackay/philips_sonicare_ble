@@ -94,6 +94,13 @@ class SonicareCoordinator {
   // Idle bridges become no-ops. When auto_connect is on, the bridge will
   // try to reconnect on the next advertisement.
   void force_disconnect();
+  // Kicks off an async RSSI read for the connected peer. Result lands in
+  // ``last_rssi_`` via the ``ESP_GAP_BLE_READ_RSSI_COMPLETE_EVT`` GAP event;
+  // ``collect_info_data`` includes the value in the next info/heartbeat.
+  // No-op when not connected.
+  void request_rssi_read();
+  int8_t get_last_rssi() const { return this->last_rssi_; }
+  bool has_last_rssi() const { return this->last_rssi_valid_; }
   // Worker registers a callback that wipes its own NVS-persisted identity and
   // resets uuid_scan_mode_ when the user requests unpair.
   void set_unpair_cb(std::function<void()> cb) {
@@ -173,6 +180,12 @@ class SonicareCoordinator {
   // __init__.py codegen; toggled at runtime by HA service ble_set_auto_connect
   // (not persisted — power-cycle reverts to YAML).
   bool auto_connect_{true};
+
+  // Latest RSSI from the most recent ESP_GAP_BLE_READ_RSSI_COMPLETE_EVT for
+  // the connected peer. -127 is the BLE "unavailable" sentinel; the valid
+  // flag avoids confusing a real -127 with "never measured".
+  int8_t last_rssi_{-127};
+  bool last_rssi_valid_{false};
 
   // Pair-mode (Mode B only): UUID-scan only happens while this is true.
   bool pair_mode_active_{false};

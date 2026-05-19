@@ -182,6 +182,9 @@ async def async_setup_entry(
             entities.append(
                 SonicareBridgeLastSeenSensor(coordinator, entry, child, count)
             )
+            entities.append(
+                SonicareBridgeRssiSensor(coordinator, entry, child, count)
+            )
 
     async_add_entities(entities)
 
@@ -1306,3 +1309,45 @@ class SonicareBridgeLastSeenSensor(PhilipsSonicareEntity, SensorEntity):
     @property
     def native_value(self) -> datetime | None:
         return self._child.last_seen
+
+
+# ---------------------------------------------------------------------------
+# Per-bridge RSSI — signal strength of the brush as seen by this bridge.
+# ---------------------------------------------------------------------------
+class SonicareBridgeRssiSensor(PhilipsSonicareEntity, SensorEntity):
+    """BLE RSSI for a specific bridge.
+
+    Only populated while this bridge holds the connection — at any moment one
+    bridge has a value and the others are unknown, mirroring the BLE single-
+    connection arbitration.
+    """
+
+    _attr_translation_key = "rssi"
+    _attr_device_class = SensorDeviceClass.SIGNAL_STRENGTH
+    _attr_native_unit_of_measurement = "dBm"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        coordinator: PhilipsSonicareCoordinator,
+        entry: ConfigEntry,
+        child: EspBridgeTransport,
+        count: int,
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._child = child
+        self._attr_unique_id = per_bridge_unique_id(
+            self._device_id, child, "rssi"
+        )
+        self._attr_device_info = per_bridge_device_info(
+            self._device_id, child, count
+        )
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    @property
+    def native_value(self) -> int | None:
+        return self._child.connection_rssi

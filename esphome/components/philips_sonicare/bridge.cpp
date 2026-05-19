@@ -92,17 +92,24 @@ void SonicareBridge::loop() {
   char uptime_str[16];
   snprintf(uptime_str, sizeof(uptime_str), "%u", now / 1000);
 
-  // Heartbeat is HA-driven (timer-based), not tied to a BLE state change,
-  // so we fire the event directly instead of going through the Coordinator's
-  // emit_status_ helper (which is for events triggered by BLE state changes).
-  this->fire_event(EVENT_STATUS,
-                    {
-                        {"status", "heartbeat"},
-                        {"ble_connected", this->coord_->is_connected() ? "true" : "false"},
-                        {"mac", this->coord_->get_device_mac()},
-                        {"version", PHILIPS_SONICARE_VERSION},
-                        {"uptime_s", std::string(uptime_str)},
-                    });
+  // Request a fresh RSSI sample — the result lands ~10 ms later via GAP
+  // and surfaces on the next heartbeat. The current heartbeat carries the
+  // previous tick's value (if any), so multi-bridge handoff decisions get
+  // a worst-case 15 s-old reading.
+  std::map<std::string, std::string> hb = {
+      {"status", "heartbeat"},
+      {"ble_connected", this->coord_->is_connected() ? "true" : "false"},
+      {"mac", this->coord_->get_device_mac()},
+      {"version", PHILIPS_SONICARE_VERSION},
+      {"uptime_s", std::string(uptime_str)},
+  };
+  if (this->coord_->is_connected() && this->coord_->has_last_rssi()) {
+    char rssi_str[8];
+    snprintf(rssi_str, sizeof(rssi_str), "%d", (int) this->coord_->get_last_rssi());
+    hb["rssi"] = std::string(rssi_str);
+  }
+  this->fire_event(EVENT_STATUS, hb);
+  this->coord_->request_rssi_read();
 
   // After OTA, the initial "ready" event can be lost (BLE connects before
   // the HA API stream is up). If we're connected with services discovered

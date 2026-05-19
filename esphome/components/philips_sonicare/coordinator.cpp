@@ -1011,8 +1011,36 @@ void SonicareCoordinator::on_gap_event(esp_gap_ble_cb_event_t event,
       break;
     }
 
+    case ESP_GAP_BLE_READ_RSSI_COMPLETE_EVT: {
+      auto &rssi_evt = param->read_rssi_cmpl;
+      auto *our_bda = this->parent_->get_remote_bda();
+      if (memcmp(rssi_evt.remote_addr, our_bda, 6) != 0)
+        break;
+      if (rssi_evt.status != ESP_BT_STATUS_SUCCESS)
+        break;
+      this->last_rssi_ = rssi_evt.rssi;
+      this->last_rssi_valid_ = true;
+      break;
+    }
+
     default:
       break;
+  }
+}
+
+void SonicareCoordinator::request_rssi_read() {
+  if (this->parent_ == nullptr || !this->connected_) {
+    // Drop any cached value when idle so we don't ship a stale RSSI in the
+    // next info event after a reconnect.
+    this->last_rssi_valid_ = false;
+    return;
+  }
+  auto *bda = this->parent_->get_remote_bda();
+  esp_bd_addr_t copy;
+  memcpy(copy, bda, 6);
+  esp_err_t err = esp_ble_gap_read_rssi(copy);
+  if (err != ESP_OK) {
+    ESP_LOGD(this->log_tag_.c_str(), "esp_ble_gap_read_rssi failed: %d", err);
   }
 }
 
@@ -1442,6 +1470,11 @@ std::map<std::string, std::string> SonicareCoordinator::collect_info_data() {
       {"pair_mode_active", this->pair_mode_active_ ? "true" : "false"},
       {"auto_connect", this->auto_connect_ ? "true" : "false"},
   };
+  if (this->connected_ && this->last_rssi_valid_) {
+    char rssi_str[8];
+    snprintf(rssi_str, sizeof(rssi_str), "%d", (int) this->last_rssi_);
+    info["rssi"] = std::string(rssi_str);
+  }
   if (!this->remote_name_.empty()) {
     info["ble_name"] = this->remote_name_;
   }
