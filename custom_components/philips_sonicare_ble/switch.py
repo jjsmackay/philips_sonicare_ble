@@ -8,13 +8,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from homeassistant.helpers import device_registry as dr
-
 from .coordinator import PhilipsSonicareCoordinator
 from .const import (
     CONF_AUTO_CONNECT_OVERRIDES,
-    CONF_ESP_BRIDGE_ID,
-    CONF_ESP_DEVICE_NAME,
     CONF_TRANSPORT_TYPE,
     DOMAIN,
     TRANSPORT_ESP_BRIDGE,
@@ -23,10 +19,12 @@ from .const import (
 )
 from .entity import (
     PhilipsSonicareEntity,
-    bridge_subdevice_id,
-    bridge_subdevice_name,
+    entry_primary_bridge_key,
+    esp_bridge_children,
+    per_bridge_device_info,
+    per_bridge_unique_id,
 )
-from .transport import EspBridgeTransport, MultiSourceTransport
+from .transport import EspBridgeTransport
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,16 +43,11 @@ async def async_setup_entry(
     entities: list = []
 
     if entry.data.get(CONF_TRANSPORT_TYPE) == TRANSPORT_ESP_BRIDGE:
-        transport = coordinator.transport
-        children = (
-            transport.children
-            if isinstance(transport, MultiSourceTransport)
-            else [transport]
-        )
-        entities.extend(
-            SonicareBridgeAutoConnectSwitch(coordinator, entry, child)
-            for child in children
-        )
+        primary_key = entry_primary_bridge_key(entry)
+        for child in esp_bridge_children(coordinator.transport):
+            entities.append(
+                SonicareBridgeAutoConnectSwitch(coordinator, entry, child, primary_key)
+            )
 
     # Settings-bitmask switches only land on devices that accept the writes.
     if supports_settings_write(model) and coordinator.supports_writes:
@@ -149,24 +142,16 @@ class SonicareBridgeAutoConnectSwitch(PhilipsSonicareEntity, SwitchEntity):
         coordinator: PhilipsSonicareCoordinator,
         entry: ConfigEntry,
         child: EspBridgeTransport,
+        primary_key: tuple[str, str],
     ) -> None:
         super().__init__(coordinator, entry)
         self._child = child
         self._key = auto_connect_key(child.device_name, child.bridge_id)
-        primary_key = (
-            entry.data.get(CONF_ESP_DEVICE_NAME, ""),
-            entry.data.get(CONF_ESP_BRIDGE_ID, ""),
+        self._attr_unique_id = per_bridge_unique_id(
+            self._device_id, child, primary_key, "auto_connect"
         )
-        sub_id = bridge_subdevice_id(
-            self._device_id, child.device_name, child.bridge_id, primary_key
-        )
-        self._attr_unique_id = f"{sub_id}_auto_connect"
-        self._attr_device_info = dr.DeviceInfo(
-            identifiers={(DOMAIN, sub_id)},
-            manufacturer="Espressif",
-            name=bridge_subdevice_name(
-                child.device_name, child.bridge_id, primary_key
-            ),
+        self._attr_device_info = per_bridge_device_info(
+            self._device_id, child, primary_key
         )
         # Default state until the first info event populates child.auto_connect
         self._attr_is_on = True

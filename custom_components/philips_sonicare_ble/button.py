@@ -6,13 +6,10 @@ import logging
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
-    CONF_ESP_BRIDGE_ID,
-    CONF_ESP_DEVICE_NAME,
     CONF_TRANSPORT_TYPE,
     DOMAIN,
     TRANSPORT_ESP_BRIDGE,
@@ -20,10 +17,12 @@ from .const import (
 from .coordinator import PhilipsSonicareCoordinator
 from .entity import (
     PhilipsSonicareEntity,
-    bridge_subdevice_id,
-    bridge_subdevice_name,
+    entry_primary_bridge_key,
+    esp_bridge_children,
+    per_bridge_device_info,
+    per_bridge_unique_id,
 )
-from .transport import EspBridgeTransport, MultiSourceTransport
+from .transport import EspBridgeTransport
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,15 +34,10 @@ async def async_setup_entry(
         return
 
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-    transport = coordinator.transport
-    children = (
-        transport.children
-        if isinstance(transport, MultiSourceTransport)
-        else [transport]
-    )
+    primary_key = entry_primary_bridge_key(entry)
     async_add_entities(
-        SonicareBridgeDisconnectButton(coordinator, entry, child)
-        for child in children
+        SonicareBridgeDisconnectButton(coordinator, entry, child, primary_key)
+        for child in esp_bridge_children(coordinator.transport)
     )
 
 
@@ -64,23 +58,15 @@ class SonicareBridgeDisconnectButton(PhilipsSonicareEntity, ButtonEntity):
         coordinator: PhilipsSonicareCoordinator,
         entry: ConfigEntry,
         child: EspBridgeTransport,
+        primary_key: tuple[str, str],
     ) -> None:
         super().__init__(coordinator, entry)
         self._child = child
-        primary_key = (
-            entry.data.get(CONF_ESP_DEVICE_NAME, ""),
-            entry.data.get(CONF_ESP_BRIDGE_ID, ""),
+        self._attr_unique_id = per_bridge_unique_id(
+            self._device_id, child, primary_key, "disconnect"
         )
-        sub_id = bridge_subdevice_id(
-            self._device_id, child.device_name, child.bridge_id, primary_key
-        )
-        self._attr_unique_id = f"{sub_id}_disconnect"
-        self._attr_device_info = dr.DeviceInfo(
-            identifiers={(DOMAIN, sub_id)},
-            manufacturer="Espressif",
-            name=bridge_subdevice_name(
-                child.device_name, child.bridge_id, primary_key
-            ),
+        self._attr_device_info = per_bridge_device_info(
+            self._device_id, child, primary_key
         )
 
     @property

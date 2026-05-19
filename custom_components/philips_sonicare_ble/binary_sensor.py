@@ -13,8 +13,15 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.entity import EntityCategory
 
 from .coordinator import PhilipsSonicareCoordinator
-from .entity import PhilipsSonicareEntity, PhilipsConnectionEntity
+from .entity import (
+    PhilipsSonicareEntity,
+    entry_primary_bridge_key,
+    esp_bridge_children,
+    per_bridge_device_info,
+    per_bridge_unique_id,
+)
 from .const import DOMAIN, CONF_SERVICES, CONF_TRANSPORT_TYPE, SVC_SENSOR, TRANSPORT_ESP_BRIDGE
+from .transport import EspBridgeTransport
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,10 +43,16 @@ async def async_setup_entry(
     if SVC_SENSOR.lower() in services:
         entities.append(SonicarePressureAlertBinarySensor(coordinator, entry))
 
-    # Connection sub-device sensors
-    entities.append(SonicareBleConnectedSensor(coordinator, entry))
+    # Per-bridge Connection sub-device sensors (one set per configured bridge)
     if entry.data.get(CONF_TRANSPORT_TYPE) == TRANSPORT_ESP_BRIDGE:
-        entities.append(SonicareBridgeAliveSensor(coordinator, entry))
+        primary_key = entry_primary_bridge_key(entry)
+        for child in esp_bridge_children(coordinator.transport):
+            entities.append(
+                SonicareBleConnectedSensor(coordinator, entry, child, primary_key)
+            )
+            entities.append(
+                SonicareBridgeAliveSensor(coordinator, entry, child, primary_key)
+            )
 
     async_add_entities(entities)
 
@@ -125,37 +138,65 @@ class SonicarePressureAlertBinarySensor(PhilipsSonicareEntity, BinarySensorEntit
         return alarm == 2
 
 
-class SonicareBridgeAliveSensor(PhilipsConnectionEntity, BinarySensorEntity):
-    """Binary sensor showing whether the ESP32 bridge is reachable."""
+class SonicareBridgeAliveSensor(PhilipsSonicareEntity, BinarySensorEntity):
+    """Binary sensor showing whether THIS bridge ESP is reachable."""
 
     _attr_translation_key = "esp_bridge_alive"
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(
-        self, coordinator: PhilipsSonicareCoordinator, entry: ConfigEntry
+        self,
+        coordinator: PhilipsSonicareCoordinator,
+        entry: ConfigEntry,
+        child: EspBridgeTransport,
+        primary_key: tuple[str, str],
     ) -> None:
         super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{self._device_id}_esp_bridge_alive"
+        self._child = child
+        self._attr_unique_id = per_bridge_unique_id(
+            self._device_id, child, primary_key, "esp_bridge_alive"
+        )
+        self._attr_device_info = per_bridge_device_info(
+            self._device_id, child, primary_key
+        )
+
+    @property
+    def available(self) -> bool:
+        return True
 
     @property
     def is_on(self) -> bool:
-        return self.coordinator.transport.is_bridge_alive
+        return self._child.is_bridge_alive
 
 
-class SonicareBleConnectedSensor(PhilipsConnectionEntity, BinarySensorEntity):
-    """BLE connection status on the ESP Bridge sub-device."""
+class SonicareBleConnectedSensor(PhilipsSonicareEntity, BinarySensorEntity):
+    """BLE connection status for THIS bridge."""
 
     _attr_translation_key = "ble_connected"
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(
-        self, coordinator: PhilipsSonicareCoordinator, entry: ConfigEntry
+        self,
+        coordinator: PhilipsSonicareCoordinator,
+        entry: ConfigEntry,
+        child: EspBridgeTransport,
+        primary_key: tuple[str, str],
     ) -> None:
         super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{self._device_id}_ble_connected"
+        self._child = child
+        self._attr_unique_id = per_bridge_unique_id(
+            self._device_id, child, primary_key, "ble_connected"
+        )
+        self._attr_device_info = per_bridge_device_info(
+            self._device_id, child, primary_key
+        )
+
+    @property
+    def available(self) -> bool:
+        return True
 
     @property
     def is_on(self) -> bool:
-        return self.coordinator.transport.is_device_connected
+        return self._child.is_device_connected

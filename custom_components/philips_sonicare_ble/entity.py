@@ -47,6 +47,54 @@ def bridge_subdevice_name(
     label = device_name + (f" / {bridge_id}" if bridge_id else "")
     return f"Connection ({label})"
 
+
+def per_bridge_device_info(
+    device_id: str, child, primary_key: tuple[str, str]
+) -> dr.DeviceInfo:
+    """DeviceInfo pointing at the per-bridge Connection sub-device for ``child``."""
+    return dr.DeviceInfo(
+        identifiers={(
+            DOMAIN,
+            bridge_subdevice_id(device_id, child.device_name, child.bridge_id, primary_key),
+        )},
+        manufacturer="Espressif",
+        name=bridge_subdevice_name(child.device_name, child.bridge_id, primary_key),
+    )
+
+
+def per_bridge_unique_id(
+    device_id: str, child, primary_key: tuple[str, str], suffix: str
+) -> str:
+    """Unique-id for a per-bridge entity.
+
+    The primary bridge keeps the legacy ``{device_id}_{suffix}`` form so
+    existing single-bridge installations don't lose entity state on upgrade.
+    Extras get the sub-device id as a prefix so they don't collide.
+    """
+    if (child.device_name, child.bridge_id) == primary_key:
+        return f"{device_id}_{suffix}"
+    sub = bridge_subdevice_id(device_id, child.device_name, child.bridge_id, primary_key)
+    return f"{sub}_{suffix}"
+
+
+def esp_bridge_children(transport) -> list:
+    """Return the list of ESP bridge children for either single or multi-source transport."""
+    from .transport import EspBridgeTransport, MultiSourceTransport
+    if isinstance(transport, MultiSourceTransport):
+        return list(transport.children)
+    if isinstance(transport, EspBridgeTransport):
+        return [transport]
+    return []
+
+
+def entry_primary_bridge_key(entry) -> tuple[str, str]:
+    """The (device_name, bridge_id) of the entry's primary bridge."""
+    from .const import CONF_ESP_BRIDGE_ID, CONF_ESP_DEVICE_NAME
+    return (
+        entry.data.get(CONF_ESP_DEVICE_NAME, ""),
+        entry.data.get(CONF_ESP_BRIDGE_ID, ""),
+    )
+
 _LOGGER = logging.getLogger(__name__)
 
 

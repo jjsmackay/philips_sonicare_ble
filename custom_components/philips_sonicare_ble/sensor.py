@@ -39,7 +39,16 @@ from .const import (
     current_sector,
 )
 from .condor_adapter import CONDOR_BRUSHING_MODES
-from .entity import PhilipsSonicareEntity, PhilipsBrushHeadEntity, PhilipsConnectionEntity
+from .entity import (
+    PhilipsSonicareEntity,
+    PhilipsBrushHeadEntity,
+    PhilipsConnectionEntity,
+    entry_primary_bridge_key,
+    esp_bridge_children,
+    per_bridge_device_info,
+    per_bridge_unique_id,
+)
+from .transport import EspBridgeTransport
 
 # Union of every brushing-mode label the integration may receive. Classic
 # (Prestige) and Condor (HX742X+) share the 0..5 ordinal but use different
@@ -145,10 +154,16 @@ async def async_setup_entry(
     if entry.data.get(CONF_TRANSPORT_TYPE) != TRANSPORT_ESP_BRIDGE:
         entities.append(SonicareRssiSensor(coordinator, entry))
 
-    # ESP bridge sub-device sensor (only for ESP transport)
+    # Per-bridge Connection sub-device sensors (one set per configured bridge)
     if entry.data.get(CONF_TRANSPORT_TYPE) == TRANSPORT_ESP_BRIDGE:
-        entities.append(SonicareBridgeVersionSensor(coordinator, entry))
-        entities.append(SonicareBridgeBootTimeSensor(coordinator, entry))
+        primary_key = entry_primary_bridge_key(entry)
+        for child in esp_bridge_children(coordinator.transport):
+            entities.append(
+                SonicareBridgeVersionSensor(coordinator, entry, child, primary_key)
+            )
+            entities.append(
+                SonicareBridgeBootTimeSensor(coordinator, entry, child, primary_key)
+            )
 
     async_add_entities(entities)
 
@@ -1095,39 +1110,69 @@ class SonicareAdapterTypeSensor(PhilipsConnectionEntity, SensorEntity):
 # ---------------------------------------------------------------------------
 # ESP Bridge Version (on bridge sub-device)
 # ---------------------------------------------------------------------------
-class SonicareBridgeVersionSensor(PhilipsConnectionEntity, SensorEntity):
-    """ESP bridge firmware component version."""
+class SonicareBridgeVersionSensor(PhilipsSonicareEntity, SensorEntity):
+    """ESP bridge firmware component version for a specific bridge."""
 
     _attr_translation_key = "bridge_version"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_icon = "mdi:chip"
 
-    def __init__(self, coordinator: PhilipsSonicareCoordinator, entry: ConfigEntry) -> None:
+    def __init__(
+        self,
+        coordinator: PhilipsSonicareCoordinator,
+        entry: ConfigEntry,
+        child: EspBridgeTransport,
+        primary_key: tuple[str, str],
+    ) -> None:
         super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{self._device_id}_bridge_version"
+        self._child = child
+        self._attr_unique_id = per_bridge_unique_id(
+            self._device_id, child, primary_key, "bridge_version"
+        )
+        self._attr_device_info = per_bridge_device_info(
+            self._device_id, child, primary_key
+        )
+
+    @property
+    def available(self) -> bool:
+        return True
 
     @property
     def native_value(self) -> str | None:
-        transport = self.coordinator.transport
-        return getattr(transport, "bridge_version", None)
+        return self._child.bridge_version
 
 
 # ---------------------------------------------------------------------------
 # ESP Bridge Last Boot (on bridge sub-device)
 # ---------------------------------------------------------------------------
-class SonicareBridgeBootTimeSensor(PhilipsConnectionEntity, SensorEntity):
-    """ESP bridge boot timestamp (refreshed only on detected restart)."""
+class SonicareBridgeBootTimeSensor(PhilipsSonicareEntity, SensorEntity):
+    """ESP bridge boot timestamp for a specific bridge (refreshed only on detected restart)."""
 
     _attr_translation_key = "bridge_boot_time"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_icon = "mdi:restart"
 
-    def __init__(self, coordinator: PhilipsSonicareCoordinator, entry: ConfigEntry) -> None:
+    def __init__(
+        self,
+        coordinator: PhilipsSonicareCoordinator,
+        entry: ConfigEntry,
+        child: EspBridgeTransport,
+        primary_key: tuple[str, str],
+    ) -> None:
         super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{self._device_id}_bridge_boot_time"
+        self._child = child
+        self._attr_unique_id = per_bridge_unique_id(
+            self._device_id, child, primary_key, "bridge_boot_time"
+        )
+        self._attr_device_info = per_bridge_device_info(
+            self._device_id, child, primary_key
+        )
+
+    @property
+    def available(self) -> bool:
+        return True
 
     @property
     def native_value(self) -> datetime | None:
-        transport = self.coordinator.transport
-        return getattr(transport, "bridge_boot_time", None)
+        return self._child.bridge_boot_time
