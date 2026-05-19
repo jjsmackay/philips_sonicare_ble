@@ -602,10 +602,16 @@ void SonicareCoordinator::on_gattc_event(esp_gattc_cb_event_t event,
       }
       // Pairing probe.
       //
-      // Classic (Sonicare service 477ea600-…): read Handle State (0x4010).
-      // The read either succeeds (open-GATT brushes like HX6340 Kids) or
-      // returns INSUF_AUTHENTICATION (bonded brushes like HX9992) which
-      // we use as the SMP trigger.
+      // Classic (Sonicare service 477ea600-…) bonded peer: skip the probe
+      // read entirely and trigger SMP encryption directly. The Sonicare
+      // re-keys the link on every fresh GATT connection even though both
+      // sides hold the bond — without eager encryption, HA's post-ready
+      // initial-poll reads race the SMP handshake and get dropped (only
+      // one of them gets retried via retry_read_after_auth_).
+      //
+      // Classic open-GATT peer (HX6340 Kids etc.) OR not-yet-bonded peer:
+      // still do the probe read. A success means open-GATT (no encryption
+      // needed); INSUF_AUTH triggers the existing pairing flow.
       //
       // Condor (newer protocol, e50ba3c0-…): no equivalent read-probe
       // char exists on V4 (HX742X) — Protocol Config (e50b0005) is
@@ -622,7 +628,14 @@ void SonicareCoordinator::on_gattc_event(esp_gattc_cb_event_t event,
         auto handle_state = espbt::ESPBTUUID::from_raw(
             "477ea600-a260-11e4-ae37-0002a5d54010");
         auto *chr = this->parent_->get_characteristic(sonicare_svc, handle_state);
-        if (chr) {
+        if (chr && this->peer_is_bonded_ && !this->encryption_requested_) {
+          ESP_LOGI(this->log_tag_.c_str(),
+                   "Bonded Classic peer — eagerly initiating SMP encryption");
+          this->encryption_requested_ = true;
+          this->apply_smp_params_();
+          esp_ble_set_encryption(this->parent_->get_remote_bda(),
+                                  ESP_BLE_SEC_ENCRYPT);
+        } else if (chr) {
           this->probe_handle_ = chr->handle;
           esp_ble_gattc_read_char(
               this->parent_->get_gattc_if(),
@@ -761,19 +774,47 @@ void SonicareCoordinator::on_gattc_event(esp_gattc_cb_event_t event,
       }
 
       if (param->read.status != ESP_GATT_OK) {
-        // Insufficient Authentication / Encryption → initiate pairing
-        // and retry the read after successful auth (don't report error yet)
-        if ((param->read.status == ESP_GATT_INSUF_AUTHENTICATION ||
-             param->read.status == ESP_GATT_INSUF_ENCRYPTION) &&
-            !this->encryption_requested_) {
-          ESP_LOGI(this->log_tag_.c_str(), "Read requires authentication (status=%d) — initiating encryption, will retry on AUTH_CMPL",
-                   param->read.status);
-          this->encryption_requested_ = true;
-          this->retry_read_after_auth_ = true;
-          this->pending_handle_ = 0;
-          this->apply_smp_params_();
-          esp_ble_set_encryption(this->parent_->get_remote_bda(),
-                                  ESP_BLE_SEC_ENCRYPT_MITM);
+        // Insufficient Authentication / Encryption: re-key the link, then
+        // retry. Two sub-paths:
+        //   - No encryption requested yet → start it and use the existing
+        //     ``retry_read_after_auth_`` slot to retry the original read on
+        //     AUTH_CMPL.
+        //   - Encryption already in flight (parallel reads racing the SMP
+        //     handshake — common when eager encryption was kicked off in
+        //     SEARCH_CMPL): requeue the read in ``pending_calls_`` so
+        //     AUTH_CMPL can drain it. Without this branch, only the *first*
+        //     INSUF_AUTH read was rescued by retry_read_after_auth_ and any
+        //     concurrent reads were permanently dropped — losing e.g.
+        //     handle_state, which then left HA's Activity sensor stuck.
+        if (param->read.status == ESP_GATT_INSUF_AUTHENTICATION ||
+            param->read.status == ESP_GATT_INSUF_ENCRYPTION) {
+          if (!this->encryption_requested_) {
+            ESP_LOGI(this->log_tag_.c_str(),
+                     "Read requires authentication (status=%d) — initiating "
+                     "encryption, will retry on AUTH_CMPL",
+                     param->read.status);
+            this->encryption_requested_ = true;
+            this->retry_read_after_auth_ = true;
+            this->pending_handle_ = 0;
+            this->apply_smp_params_();
+            esp_ble_set_encryption(this->parent_->get_remote_bda(),
+                                    ESP_BLE_SEC_ENCRYPT_MITM);
+          } else if (this->pending_calls_.size() < MAX_PENDING_CALLS) {
+            ESP_LOGD(this->log_tag_.c_str(),
+                     "Read of %s raced SMP — requeuing for AUTH_CMPL",
+                     this->pending_char_uuid_.c_str());
+            std::string svc = this->pending_service_uuid_;
+            std::string chr = this->pending_char_uuid_;
+            this->pending_calls_.push_back(
+                [this, svc, chr]() { this->read_characteristic(svc, chr); });
+            this->pending_handle_ = 0;
+          } else {
+            ESP_LOGW(this->log_tag_.c_str(),
+                     "Pending queue full while SMP in flight — dropping "
+                     "read for %s", this->pending_char_uuid_.c_str());
+            this->emit_data_(this->pending_char_uuid_, "", "queue_full");
+            this->pending_handle_ = 0;
+          }
           break;
         }
         ESP_LOGW(this->log_tag_.c_str(), "Read failed for %s, status=%d",
@@ -973,6 +1014,19 @@ void SonicareCoordinator::on_gap_event(esp_gap_ble_cb_event_t event,
           std::string svc = this->pending_service_uuid_;
           std::string chr = this->pending_char_uuid_;
           this->read_characteristic(svc, chr);
+        } else {
+          // No single in-flight read was sitting on retry_read_after_auth_
+          // (eager-encryption path on a bonded peer), but reads might have
+          // raced the SMP handshake and landed in pending_calls_ via the
+          // INSUF_AUTH requeue branch in READ_CHAR_EVT. Clear the encryption
+          // flag so future faults can re-arm SMP, and drain whatever's queued.
+          this->encryption_requested_ = false;
+          if (!this->pending_calls_.empty()) {
+            ESP_LOGD(this->log_tag_.c_str(),
+                     "AUTH_CMPL: draining %u read(s) that raced SMP",
+                     (unsigned) this->pending_calls_.size());
+            this->drain_next_pending_call_();
+          }
         }
       } else {
         ESP_LOGW(this->log_tag_.c_str(), "Authentication FAILED (reason=0x%X)", auth.fail_reason);
