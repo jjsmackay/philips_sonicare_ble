@@ -126,6 +126,10 @@ async def to_code(config):
     coord_var = cg.new_Pvariable(config[CONF_COORD_GENERATED_ID])
     cg.add(coord_var.set_notify_throttle(config[CONF_NOTIFY_THROTTLE]))
     cg.add(coord_var.set_log_tag(log_tag))
+    # Mode B has CONF_AUTO_CONNECT in the schema; Mode A uses the external
+    # ble_client's own field — fall back to True there so the runtime override
+    # mirror starts in the expected state.
+    cg.add(coord_var.set_auto_connect(config.get(CONF_AUTO_CONNECT, True)))
 
     # Bridge (SonicareBridge) — HA service registration, event firing, sensors
     bridge_var = cg.new_Pvariable(config[CONF_BRIDGE_GENERATED_ID])

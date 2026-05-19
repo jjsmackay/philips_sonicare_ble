@@ -309,7 +309,11 @@
     "switch": {
       "adaptive_intensity": { "name": "Adaptive Intensity" },
       "scrubbing_feedback": { "name": "Scrubbing Feedback" },
-      "pressure_feedback": { "name": "Pressure Feedback" }
+      "pressure_feedback": { "name": "Pressure Feedback" },
+      "auto_connect": { "name": "Auto Connect" }
+    },
+    "button": {
+      "disconnect": { "name": "Disconnect" }
     }
   }
 }

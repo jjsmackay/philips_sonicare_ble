@@ -66,6 +66,8 @@ class SonicareBridge : public Component, public api::CustomAPIDevice {
   void on_unpair();
   void on_scan(std::string timeout_s);
   void on_pair_mac(std::string mac, std::string timeout_s);
+  void on_set_auto_connect(bool enabled);
+  void on_disconnect();
 };
 
 }  // namespace philips_sonicare

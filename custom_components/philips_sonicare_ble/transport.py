@@ -400,6 +400,8 @@ class EspBridgeTransport(SonicareTransport):
         self._bridge_version: str | None = None
         self._pending_info: asyncio.Future[dict[str, str]] | None = None
         self._ble_paired: str | None = None
+        self._auto_connect: bool | None = None
+        self._desired_auto_connect: bool | None = None
         self._needs_resubscribe = False
         self._ready_event = asyncio.Event()
         self._last_uptime: int | None = None
@@ -415,6 +417,10 @@ class EspBridgeTransport(SonicareTransport):
     @property
     def device_name(self) -> str:
         return self._device_name
+
+    @property
+    def bridge_id(self) -> str:
+        return self._esp_bridge_id
 
     @staticmethod
     def _get_service_uuid(char_uuid: str) -> str:
@@ -451,6 +457,18 @@ class EspBridgeTransport(SonicareTransport):
     @property
     def ble_paired(self) -> str | None:
         return self._ble_paired
+
+    @property
+    def auto_connect(self) -> bool | None:
+        return self._auto_connect
+
+    @property
+    def desired_auto_connect(self) -> bool | None:
+        return self._desired_auto_connect
+
+    def set_desired_auto_connect(self, value: bool | None) -> None:
+        """Set the user-intent value used for reconciliation on info events."""
+        self._desired_auto_connect = value
 
     @property
     def is_bridge_alive(self) -> bool:
@@ -597,6 +615,18 @@ class EspBridgeTransport(SonicareTransport):
                 ble_connected = event.data.get("ble_connected")
                 if ble_connected is not None:
                     self._device_connected = ble_connected == "true"
+                auto_connect_str = event.data.get("auto_connect")
+                if auto_connect_str is not None:
+                    self._auto_connect = auto_connect_str == "true"
+                    if (
+                        self._desired_auto_connect is not None
+                        and self._auto_connect != self._desired_auto_connect
+                    ):
+                        # ESP reverted to YAML default (e.g. after reboot) but
+                        # user wanted otherwise — re-apply.
+                        self._hass.async_create_task(
+                            self.set_auto_connect(self._desired_auto_connect)
+                        )
                 if self._pending_info and not self._pending_info.done():
                     self._pending_info.set_result(dict(event.data))
             elif status == "heartbeat":
@@ -968,6 +998,34 @@ class EspBridgeTransport(SonicareTransport):
             {},
             blocking=True,
         )
+
+    async def set_auto_connect(self, enabled: bool) -> None:
+        """Toggle the bridge's auto-connect at runtime. Not persisted on the ESP."""
+        self._desired_auto_connect = enabled
+        self._auto_connect = enabled
+        try:
+            await self._hass.services.async_call(
+                "esphome",
+                self._svc_name("ble_set_auto_connect"),
+                {"enabled": enabled},
+                blocking=True,
+            )
+        except HomeAssistantError as err:
+            raise TransportError(f"ESP set_auto_connect failed: {err}") from err
+
+    async def force_disconnect(self) -> None:
+        """Drop the current GATT link if any. No-op when bridge is idle."""
+        if not self._hass.services.has_service("esphome", self._svc_name("ble_disconnect")):
+            return
+        try:
+            await self._hass.services.async_call(
+                "esphome",
+                self._svc_name("ble_disconnect"),
+                {},
+                blocking=True,
+            )
+        except HomeAssistantError as err:
+            raise TransportError(f"ESP disconnect failed: {err}") from err
 
     def set_disconnect_callback(self, cb: Callable[[], None]) -> None:
         self._disconnect_cb = cb

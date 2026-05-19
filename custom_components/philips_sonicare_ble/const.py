@@ -442,6 +442,17 @@ CONF_ESP_BRIDGE_ID = "esp_bridge_id"
 # wins the BLE connection race; HA fans subscribe/connect calls out to all.
 CONF_ESP_BRIDGES = "esp_bridges"
 
+# Per-bridge auto-connect override: dict keyed by "{device_name}|{bridge_id}"
+# → bool. Lives in entry.options. Absent key = "follow YAML default on the
+# bridge". Mirrors the user's switch state on each ESP and is re-applied via
+# ble_set_auto_connect whenever an info event reports a divergent value
+# (e.g. after the ESP reboots back to its YAML default).
+CONF_AUTO_CONNECT_OVERRIDES = "auto_connect_overrides"
+
+
+def auto_connect_key(device_name: str, bridge_id: str) -> str:
+    return f"{device_name}|{bridge_id}"
+
 CONF_NOTIFY_THROTTLE = "notify_throttle_ms"
 DEFAULT_NOTIFY_THROTTLE = 500
 MIN_NOTIFY_THROTTLE = 100

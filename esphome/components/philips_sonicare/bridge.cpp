@@ -61,6 +61,11 @@ void SonicareBridge::setup() {
   this->register_service(&SonicareBridge::on_pair_mac,
                           this->svc_name_("ble_pair_mac"),
                           {"mac", "timeout_s"});
+  this->register_service(&SonicareBridge::on_set_auto_connect,
+                          this->svc_name_("ble_set_auto_connect"),
+                          {"enabled"});
+  this->register_service(&SonicareBridge::on_disconnect,
+                          this->svc_name_("ble_disconnect"), {});
   if (this->bridge_id_.empty())
     ESP_LOGI(this->log_tag_.c_str(), "Services registered");
   else
@@ -214,6 +219,19 @@ void SonicareBridge::on_pair_mac(std::string mac, std::string timeout_s) {
   if (this->coord_ == nullptr)
     return;
   this->coord_->set_pair_mac(mac, parse_timeout_s(timeout_s, 60, "timeout_s"));
+}
+
+void SonicareBridge::on_set_auto_connect(bool enabled) {
+  if (this->coord_ == nullptr)
+    return;
+  this->coord_->set_auto_connect(enabled);
+  this->on_get_info();
+}
+
+void SonicareBridge::on_disconnect() {
+  if (this->coord_ == nullptr)
+    return;
+  this->coord_->force_disconnect();
 }
 
 }  // namespace philips_sonicare

@@ -20,7 +20,9 @@ from .const import (
     CONF_ESP_DEVICE_NAME,
     CONF_ESP_BRIDGE_ID,
     CONF_ESP_BRIDGES,
+    CONF_AUTO_CONNECT_OVERRIDES,
     CHAR_SERVICE_MAP,
+    auto_connect_key,
 )
 from .coordinator import PhilipsSonicareCoordinator
 from .helpers import bridge_service_name, esphome_service_id
@@ -60,7 +62,13 @@ def get_configured_bridges(entry_data: dict) -> list[dict[str, str]]:
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.SELECT, Platform.SWITCH]
+PLATFORMS = [
+    Platform.SENSOR,
+    Platform.BINARY_SENSOR,
+    Platform.SELECT,
+    Platform.SWITCH,
+    Platform.BUTTON,
+]
 
 SERVICE_READ_CHARACTERISTIC = "read_characteristic"
 SERVICE_WRITE_CHARACTERISTIC = "write_characteristic"
@@ -135,6 +143,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             EspBridgeTransport(hass, address, b["device_name"], b["bridge_id"])
             for b in bridges
         ]
+        overrides = entry.options.get(CONF_AUTO_CONNECT_OVERRIDES, {}) or {}
+        for child, bridge_def in zip(children, bridges):
+            key = auto_connect_key(bridge_def["device_name"], bridge_def["bridge_id"])
+            if key in overrides:
+                child.set_desired_auto_connect(bool(overrides[key]))
         if len(children) == 1:
             transport = children[0]
         else:

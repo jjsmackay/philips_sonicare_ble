@@ -337,6 +337,29 @@ void SonicareCoordinator::set_pair_mac(const std::string &mac,
   this->set_pair_mode(true, timeout_s);
 }
 
+void SonicareCoordinator::set_auto_connect(bool enabled) {
+  this->auto_connect_ = enabled;
+  if (this->parent_ != nullptr)
+    this->parent_->set_auto_connect(enabled);
+  ESP_LOGI(this->log_tag_.c_str(), "auto_connect → %s", enabled ? "on" : "off");
+}
+
+void SonicareCoordinator::force_disconnect() {
+  if (this->parent_ == nullptr)
+    return;
+  if (!this->connected_) {
+    ESP_LOGD(this->log_tag_.c_str(), "force_disconnect: already idle");
+    return;
+  }
+  ESP_LOGI(this->log_tag_.c_str(), "force_disconnect: closing GATT link");
+  auto err = esp_ble_gattc_close(this->parent_->get_gattc_if(),
+                                  this->parent_->get_conn_id());
+  if (err != ESP_OK) {
+    ESP_LOGW(this->log_tag_.c_str(),
+             "esp_ble_gattc_close error, status=%d", err);
+  }
+}
+
 void SonicareCoordinator::unpair() {
   std::string previous_mac = this->identity_address_;
   ESP_LOGW(this->log_tag_.c_str(),
@@ -1417,6 +1440,7 @@ std::map<std::string, std::string> SonicareCoordinator::collect_info_data() {
                                        : this->identity_source_},
       {"pair_capable", pair_capable ? "true" : "false"},
       {"pair_mode_active", this->pair_mode_active_ ? "true" : "false"},
+      {"auto_connect", this->auto_connect_ ? "true" : "false"},
   };
   if (!this->remote_name_.empty()) {
     info["ble_name"] = this->remote_name_;

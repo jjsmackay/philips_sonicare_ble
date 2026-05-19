@@ -86,6 +86,14 @@ class SonicareCoordinator {
   // Called by HA service ble_unpair. Removes the BLE bond, clears any cached
   // identity address (Worker-side via callback) and disconnects.
   void unpair();
+  // Called by HA service ble_set_auto_connect. Runtime-only override of the
+  // YAML default — power-cycle reverts to the YAML value.
+  void set_auto_connect(bool enabled);
+  bool get_auto_connect() const { return this->auto_connect_; }
+  // Called by HA service ble_disconnect. Drops the current GATT link if any.
+  // Idle bridges become no-ops. When auto_connect is on, the bridge will
+  // try to reconnect on the next advertisement.
+  void force_disconnect();
   // Worker registers a callback that wipes its own NVS-persisted identity and
   // resets uuid_scan_mode_ when the user requests unpair.
   void set_unpair_cb(std::function<void()> cb) {
@@ -160,6 +168,11 @@ class SonicareCoordinator {
   std::string mode_;       // MODE_EXTERNAL or MODE_STANDALONE
   std::string identity_address_;  // empty if no identity persisted
   std::string identity_source_;   // IDENTITY_SOURCE_YAML / NVS / NONE
+
+  // Runtime mirror of the YAML auto_connect default. Initialised from
+  // __init__.py codegen; toggled at runtime by HA service ble_set_auto_connect
+  // (not persisted — power-cycle reverts to YAML).
+  bool auto_connect_{true};
 
   // Pair-mode (Mode B only): UUID-scan only happens while this is true.
   bool pair_mode_active_{false};
