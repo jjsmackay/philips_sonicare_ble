@@ -275,6 +275,9 @@ async def run_pair_mode(
         data = event.data
         if data.get("bridge_id", "") != bridge_id:
             return
+        event_device = data.get("device_name", "") or ""
+        if event_device and esphome_service_id(event_device) != esp_device_name:
+            return
         if data.get("status") not in ("pair_complete", "pair_timeout"):
             return
         if not pair_future.done():

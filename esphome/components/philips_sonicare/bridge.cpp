@@ -1,5 +1,6 @@
 #include "bridge.h"
 #include "coordinator.h"
+#include "esphome/core/application.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
 
@@ -141,6 +142,10 @@ void SonicareBridge::fire_event(const std::string &event_type,
   // still gets emitted as "" — listeners just don't filter on it.
   std::map<std::string, std::string> enriched = data;
   enriched["bridge_id"] = this->bridge_id_;
+  // Multi-bridge disambiguator: without this, two ESPs that happen to use the
+  // same bridge_id (or empty bridge_id) are indistinguishable to HA, and
+  // every transport instance reacts to every other bridge's events.
+  enriched["device_name"] = App.get_name();
   this->fire_homeassistant_event(event_type, enriched);
 }
 

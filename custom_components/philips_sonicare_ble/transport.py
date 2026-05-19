@@ -27,7 +27,7 @@ from homeassistant.helpers.event import async_track_time_interval
 
 from .const import CHAR_SERVICE_MAP
 from .exceptions import TransportError
-from .helpers import bridge_service_name
+from .helpers import bridge_service_name, esphome_service_id
 
 _LOGGER = logging.getLogger(__name__)
 _RAW_LOGGER = logging.getLogger(__name__ + ".raw")
@@ -426,6 +426,26 @@ class EspBridgeTransport(SonicareTransport):
     def _svc_name(self, action: str) -> str:
         return bridge_service_name(self._device_name, action, self._esp_bridge_id)
 
+    def _event_is_from_this_bridge(self, data: dict) -> bool:
+        """True iff a HA event payload originated from this transport's bridge.
+
+        In multi-bridge setups every ESP fires events to the same HA bus event
+        names, so without source filtering each transport instance would react
+        to every other bridge's heartbeats/status. The firmware enriches every
+        event with ``device_name`` (the ESP's name) and ``bridge_id`` (the
+        per-slot suffix); we accept only events that match BOTH this
+        transport's ESP and slot. Empty fields are treated as wildcards for
+        backward compatibility with older firmware that didn't emit them.
+        """
+        event_device = data.get("device_name", "") or ""
+        if event_device:
+            if esphome_service_id(event_device) != self._device_name:
+                return False
+        event_bid = data.get("bridge_id", "")
+        if event_bid and self._esp_bridge_id and event_bid != self._esp_bridge_id:
+            return False
+        return True
+
     @property
     def device_name(self) -> str:
         return self._device_name
@@ -530,6 +550,8 @@ class EspBridgeTransport(SonicareTransport):
         @callback
         def _handle_event(event: Event) -> None:
             data = event.data
+            if not self._event_is_from_this_bridge(data):
+                return
             mac = data.get("mac", "")
             if mac and self._detected_mac and mac.upper() != self._detected_mac.upper():
                 return
@@ -576,6 +598,8 @@ class EspBridgeTransport(SonicareTransport):
 
         @callback
         def _handle_status_event(event: Event) -> None:
+            if not self._event_is_from_this_bridge(event.data):
+                return
             mac = event.data.get("mac", "")
             if mac and self._detected_mac and mac.upper() != self._detected_mac.upper():
                 return
@@ -624,12 +648,8 @@ class EspBridgeTransport(SonicareTransport):
                     pass
 
             if status == "info":
-                # Filter by bridge_id if present (multi-device ESP)
-                event_bridge_id = event.data.get("bridge_id", "")
-                if event_bridge_id and self._esp_bridge_id and event_bridge_id != self._esp_bridge_id:
-                    return
-                # Only set _detected_mac from info events (bridge_id filtered)
-                # to avoid cross-contamination from other instances' heartbeats
+                # _event_is_from_this_bridge already filtered by
+                # (device_name, bridge_id); safe to take mac as authoritative.
                 if mac and not self._detected_mac:
                     self._detected_mac = mac
                 paired = event.data.get("paired")

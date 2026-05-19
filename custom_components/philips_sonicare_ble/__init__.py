@@ -518,6 +518,11 @@ async def _unpair_bridge(
             return
         if event.data.get("bridge_id", "") != bridge_id:
             return
+        # Multi-bridge: also disambiguate by ESP name in case two ESPs share
+        # a bridge_id. Older firmware (no device_name in payload) wildcards.
+        event_device = event.data.get("device_name", "") or ""
+        if event_device and esphome_service_id(event_device) != esp_device_name:
+            return
         unpair_done.set()
 
     unsub = hass.bus.async_listen(
