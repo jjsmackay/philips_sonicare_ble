@@ -79,6 +79,8 @@ async def async_setup_entry(
     model = entry.data.get("model", "")
     is_kids = model.upper().startswith("HX63")
 
+    is_esp_bridge = entry.data.get(CONF_TRANSPORT_TYPE) == TRANSPORT_ESP_BRIDGE
+
     entities: list[PhilipsSonicareEntity] = [
         # Toothbrush handle sensors
         SonicareBatterySensor(coordinator, entry),
@@ -93,12 +95,19 @@ async def async_setup_entry(
         SonicareMotorRuntimeSensor(coordinator, entry),
         SonicareModelNumberSensor(coordinator, entry),
         SonicareFirmwareSensor(coordinator, entry),
-        SonicareLastSeenSensor(coordinator, entry),
         SonicareHandleTimeSensor(coordinator, entry),
         SonicareActivitySensor(coordinator, entry),
-        SonicareAdapterSensor(coordinator, entry),
-        SonicareAdapterTypeSensor(coordinator, entry),
     ]
+
+    # Direct-BLE entries get the aggregate Adapter / Adapter Type / Last Seen
+    # entities (there's only one transport so per-bridge would be a no-op).
+    # ESP-bridge entries get per-bridge variants below.
+    if not is_esp_bridge:
+        entities.extend([
+            SonicareAdapterSensor(coordinator, entry),
+            SonicareAdapterTypeSensor(coordinator, entry),
+            SonicareLastSeenSensor(coordinator, entry),
+        ])
 
     # Not available on Kids devices (HX63xx)
     if not is_kids:
@@ -155,7 +164,7 @@ async def async_setup_entry(
         entities.append(SonicareRssiSensor(coordinator, entry))
 
     # Per-bridge Connection sub-device sensors (one set per configured bridge)
-    if entry.data.get(CONF_TRANSPORT_TYPE) == TRANSPORT_ESP_BRIDGE:
+    if is_esp_bridge:
         primary_key = entry_primary_bridge_key(entry)
         for child in esp_bridge_children(coordinator.transport):
             entities.append(
@@ -163,6 +172,15 @@ async def async_setup_entry(
             )
             entities.append(
                 SonicareBridgeBootTimeSensor(coordinator, entry, child, primary_key)
+            )
+            entities.append(
+                SonicareBridgeAdapterSensor(coordinator, entry, child, primary_key)
+            )
+            entities.append(
+                SonicareBridgeAdapterTypeSensor(coordinator, entry, child, primary_key)
+            )
+            entities.append(
+                SonicareBridgeLastSeenSensor(coordinator, entry, child, primary_key)
             )
 
     async_add_entities(entities)
@@ -1176,3 +1194,115 @@ class SonicareBridgeBootTimeSensor(PhilipsSonicareEntity, SensorEntity):
     @property
     def native_value(self) -> datetime | None:
         return self._child.bridge_boot_time
+
+
+# ---------------------------------------------------------------------------
+# Per-bridge Adapter (name of this bridge when it's holding the BLE link)
+# ---------------------------------------------------------------------------
+class SonicareBridgeAdapterSensor(PhilipsSonicareEntity, SensorEntity):
+    """Adapter name for a specific bridge — its device_name while connected."""
+
+    _attr_translation_key = "adapter"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:bluetooth-connect"
+
+    def __init__(
+        self,
+        coordinator: PhilipsSonicareCoordinator,
+        entry: ConfigEntry,
+        child: EspBridgeTransport,
+        primary_key: tuple[str, str],
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._child = child
+        self._attr_unique_id = per_bridge_unique_id(
+            self._device_id, child, primary_key, "adapter"
+        )
+        self._attr_device_info = per_bridge_device_info(
+            self._device_id, child, primary_key
+        )
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    @property
+    def native_value(self) -> str | None:
+        return self._child.connection_path
+
+
+# ---------------------------------------------------------------------------
+# Per-bridge Adapter Type (esp_bridge / stock_proxy / ... — could differ per
+# bridge if a bridge ESP is wired through a different transport class).
+# ---------------------------------------------------------------------------
+class SonicareBridgeAdapterTypeSensor(PhilipsSonicareEntity, SensorEntity):
+    """Classification of the transport carrying this bridge's link."""
+
+    _attr_translation_key = "adapter_type"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["direct_ble", "esp_bridge", "stock_proxy", "unknown"]
+    _attr_icon = "mdi:transit-connection-variant"
+
+    def __init__(
+        self,
+        coordinator: PhilipsSonicareCoordinator,
+        entry: ConfigEntry,
+        child: EspBridgeTransport,
+        primary_key: tuple[str, str],
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._child = child
+        self._attr_unique_id = per_bridge_unique_id(
+            self._device_id, child, primary_key, "adapter_type"
+        )
+        self._attr_device_info = per_bridge_device_info(
+            self._device_id, child, primary_key
+        )
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    @property
+    def native_value(self) -> str:
+        # Coordinator's adapter_type currently reflects the active path; in
+        # multi-bridge entries every child uses the same transport class so
+        # this is the same value on each per-bridge sensor today. Kept per
+        # entity in case future routing exposes per-bridge proxy paths.
+        return self.coordinator.adapter_type
+
+
+# ---------------------------------------------------------------------------
+# Per-bridge Last Seen (most recent notification through this bridge)
+# ---------------------------------------------------------------------------
+class SonicareBridgeLastSeenSensor(PhilipsSonicareEntity, SensorEntity):
+    """Last time this specific bridge delivered data from the brush."""
+
+    _attr_translation_key = "last_seen"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        coordinator: PhilipsSonicareCoordinator,
+        entry: ConfigEntry,
+        child: EspBridgeTransport,
+        primary_key: tuple[str, str],
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._child = child
+        self._attr_unique_id = per_bridge_unique_id(
+            self._device_id, child, primary_key, "last_seen"
+        )
+        self._attr_device_info = per_bridge_device_info(
+            self._device_id, child, primary_key
+        )
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    @property
+    def native_value(self) -> datetime | None:
+        return self._child.last_seen

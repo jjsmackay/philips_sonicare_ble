@@ -406,6 +406,7 @@ class EspBridgeTransport(SonicareTransport):
         self._ready_event = asyncio.Event()
         self._last_uptime: int | None = None
         self._boot_time: datetime | None = None
+        self._last_seen: datetime | None = None
 
     @property
     def connection_path(self) -> str | None:
@@ -444,6 +445,16 @@ class EspBridgeTransport(SonicareTransport):
     @property
     def bridge_version(self) -> str | None:
         return self._bridge_version
+
+    @property
+    def last_seen(self) -> datetime | None:
+        """Wall-clock time of the most recent data event from this bridge.
+
+        Updated whenever a notification arrives via the bridge's data-event
+        bus for this brush. Useful in multi-bridge setups to see which
+        bridge has been hearing the brush recently.
+        """
+        return self._last_seen
 
     @property
     def bridge_boot_time(self) -> datetime | None:
@@ -547,6 +558,7 @@ class EspBridgeTransport(SonicareTransport):
                         uuid,
                         payload.hex() if payload else "",
                     )
+                self._last_seen = datetime.now(timezone.utc)
                 self._notify_callbacks[uuid](uuid, payload)
 
         self._event_unsub = self._hass.bus.async_listen(ESP_EVENT_NAME, _handle_event)
