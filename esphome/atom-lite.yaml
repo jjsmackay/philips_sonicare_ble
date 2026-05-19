@@ -17,6 +17,11 @@ esp32:
     sdkconfig_options:
       CONFIG_BT_GATTC_MAX_CACHE_CHAR: "80"    # default 40; Sonicare has ~45 attributes
       CONFIG_BT_GATTC_NOTIF_REG_MAX: "20"     # default 5; we subscribe to 11 chars
+      # Persist the discovered GATT DB to NVS, keyed by bonded peer identity.
+      # ESP-IDF defaults this OFF, which forces a full ~4s service-discovery
+      # round-trip on every reconnect. With it on, second-and-subsequent
+      # connects to the same brush hit the cache in tens of ms.
+      CONFIG_BT_GATTC_CACHE_NVS_FLASH: "y"
 
 logger:
   level: DEBUG
