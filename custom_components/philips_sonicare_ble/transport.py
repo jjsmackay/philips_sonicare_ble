@@ -969,3 +969,187 @@ class EspBridgeTransport(SonicareTransport):
 
     def set_disconnect_callback(self, cb: Callable[[], None]) -> None:
         self._disconnect_cb = cb
+
+
+class MultiSourceTransport(SonicareTransport):
+    """Multi-bridge transport: fans subscribe/connect out to N EspBridge children.
+
+    Each child is bonded to the brush independently (separate NVS on its ESP).
+    The brush only accepts one active GATT connection, so at most one child is
+    `is_connected` at any moment — the BLE link-layer arbitrates. Reads/writes
+    forward to whichever child currently holds that connection; subscriptions
+    are pre-armed on every child so notifications start the instant a session
+    begins, regardless of which bridge wins the race.
+    """
+
+    def __init__(self, children: list[EspBridgeTransport]) -> None:
+        if not children:
+            raise ValueError("MultiSourceTransport requires at least one child")
+        self._children = children
+        self._disconnect_cb: Callable[[], None] | None = None
+        for child in self._children:
+            child.set_disconnect_callback(self._on_child_state_change)
+
+    @property
+    def children(self) -> list[EspBridgeTransport]:
+        return list(self._children)
+
+    def _on_child_state_change(self) -> None:
+        if self._disconnect_cb:
+            self._disconnect_cb()
+
+    def _active_child(self) -> EspBridgeTransport | None:
+        """Return the child currently holding the BLE connection, if any."""
+        for child in self._children:
+            if child.is_connected:
+                return child
+        return None
+
+    def _alive_child(self) -> EspBridgeTransport | None:
+        """Return the first child whose bridge is alive (ESP responsive)."""
+        for child in self._children:
+            if child.is_bridge_alive:
+                return child
+        return None
+
+    async def connect(self) -> None:
+        results = await asyncio.gather(
+            *(child.connect() for child in self._children),
+            return_exceptions=True,
+        )
+        errors = [r for r in results if isinstance(r, Exception)]
+        if len(errors) == len(self._children):
+            # Every child failed — surface the first error
+            raise errors[0]
+        if errors:
+            for child, err in zip(self._children, results):
+                if isinstance(err, Exception):
+                    _LOGGER.warning(
+                        "Bridge %s failed to come up: %s",
+                        child._device_name, err,
+                    )
+
+    async def disconnect(self) -> None:
+        await asyncio.gather(
+            *(child.disconnect() for child in self._children),
+            return_exceptions=True,
+        )
+
+    @property
+    def is_bridge_alive(self) -> bool:
+        return any(c.is_bridge_alive for c in self._children)
+
+    @property
+    def is_device_connected(self) -> bool:
+        return any(c.is_device_connected for c in self._children)
+
+    @property
+    def is_connected(self) -> bool:
+        return any(c.is_connected for c in self._children)
+
+    @property
+    def connection_path(self) -> str | None:
+        active = self._active_child()
+        return active.connection_path if active else None
+
+    @property
+    def connection_rssi(self) -> int | None:
+        active = self._active_child()
+        return active.connection_rssi if active else None
+
+    @property
+    def detected_mac(self) -> str | None:
+        for child in self._children:
+            if child.detected_mac:
+                return child.detected_mac
+        return None
+
+    @property
+    def bridge_version(self) -> str | None:
+        active = self._active_child() or self._alive_child()
+        return active.bridge_version if active else None
+
+    @property
+    def bridge_boot_time(self) -> datetime | None:
+        active = self._active_child() or self._alive_child()
+        return active.bridge_boot_time if active else None
+
+    @property
+    def ble_paired(self) -> str | None:
+        active = self._active_child() or self._alive_child()
+        return active.ble_paired if active else None
+
+    @property
+    def needs_resubscribe(self) -> bool:
+        return any(c.needs_resubscribe for c in self._children)
+
+    def acknowledge_resubscribe(self) -> None:
+        for child in self._children:
+            child.acknowledge_resubscribe()
+
+    def pop_read_error(self, char_uuid: str) -> str | None:
+        active = self._active_child()
+        if active is None:
+            return None
+        return active.pop_read_error(char_uuid)
+
+    async def read_char(self, char_uuid: str) -> bytes | None:
+        active = self._active_child()
+        if active is None:
+            return None
+        return await active.read_char(char_uuid)
+
+    async def read_chars(self, char_uuids: list[str]) -> dict[str, bytes | None]:
+        active = self._active_child()
+        if active is None:
+            return {u: None for u in char_uuids}
+        return await active.read_chars(char_uuids)
+
+    async def write_char(self, char_uuid: str, data: bytes) -> None:
+        active = self._active_child()
+        if active is None:
+            raise TransportError("No bridge currently connected")
+        await active.write_char(char_uuid, data)
+
+    async def subscribe(self, char_uuid: str, cb: Callable[[str, bytes], None]) -> None:
+        """Pre-arm the subscription on every child.
+
+        Each bridge's firmware tracks its own desired_subscriptions_ and
+        re-issues them on connect, so the brush starts streaming the moment
+        any bridge wins the next session — no late HA-side handoff.
+        """
+        last_error: Exception | None = None
+        any_ok = False
+        for child in self._children:
+            try:
+                await child.subscribe(char_uuid, cb)
+                any_ok = True
+            except Exception as err:  # noqa: BLE001 — tolerate per-bridge failures
+                last_error = err
+                _LOGGER.debug(
+                    "Subscribe to %s on %s failed (other bridges continue): %s",
+                    char_uuid, child._device_name, err,
+                )
+        if not any_ok and last_error is not None:
+            raise last_error
+
+    async def unsubscribe(self, char_uuid: str) -> None:
+        await asyncio.gather(
+            *(child.unsubscribe(char_uuid) for child in self._children),
+            return_exceptions=True,
+        )
+
+    async def unsubscribe_all(self) -> None:
+        await asyncio.gather(
+            *(child.unsubscribe_all() for child in self._children),
+            return_exceptions=True,
+        )
+
+    async def set_notify_throttle(self, ms: int) -> None:
+        await asyncio.gather(
+            *(child.set_notify_throttle(ms) for child in self._children),
+            return_exceptions=True,
+        )
+
+    def set_disconnect_callback(self, cb: Callable[[], None]) -> None:
+        self._disconnect_cb = cb

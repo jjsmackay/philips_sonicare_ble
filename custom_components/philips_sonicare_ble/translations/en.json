@@ -95,6 +95,15 @@
     "step": {
       "init": {
         "title": "Philips Sonicare Options",
+        "description": "Choose what to do.",
+        "menu_options": {
+          "settings": "Sensor settings",
+          "add_bridge": "Add another ESP bridge for this brush",
+          "remove_bridge": "Remove a bridge from this brush"
+        }
+      },
+      "settings": {
+        "title": "Philips Sonicare Options",
         "data": {
           "sensor_pressure": "Enable pressure sensor",
           "sensor_temperature": "Enable temperature sensor",
@@ -107,7 +116,39 @@
           "sensor_gyroscope": "Stream 6-axis IMU data during brushing sessions (0x04). High bandwidth — may impact ESP performance.",
           "notify_throttle_ms": "Minimum interval between BLE notification events forwarded by the ESP bridge. Lower values give faster updates but may overload the ESP. Only applies to ESP32 bridge connections."
         }
+      },
+      "add_bridge": {
+        "title": "Add another ESP bridge",
+        "description": "Pick an ESP bridge to also serve this brush. Each bridge bonds independently to the brush, and the BLE link-layer picks one bridge per session — useful for coverage across rooms in larger homes.",
+        "data": {
+          "bridge_key": "ESP bridge slot"
+        }
+      },
+      "add_bridge_pair": {
+        "title": "Pair brush with new bridge",
+        "description": "Bridge **{target}** has no toothbrush bonded yet.\n\n1. **Switch on** the Sonicare and hold it within ~1 m of this bridge.\n2. Click **Start pairing**. The dialog waits up to ~60 s while the bridge scans and bonds. Don't close this dialog.",
+        "submit": "Start pairing"
+      },
+      "remove_bridge": {
+        "title": "Remove a bridge",
+        "description": "Pick a bridge to remove from this brush. The bridge will be unpaired and will no longer serve this brush.",
+        "data": {
+          "bridge_key": "Bridge to remove"
+        }
       }
+    },
+    "error": {
+      "cannot_connect": "Could not reach the chosen ESP bridge. Make sure it is online.",
+      "pair_timeout": "No Sonicare paired within the time window. Press the toothbrush's power button to wake it and try again.",
+      "bridge_bonded_to_other_brush": "That bridge is already bonded to a different toothbrush. Remove the existing bond first, or pick another bridge.",
+      "paired_with_other_brush": "The bridge bonded with a different toothbrush during pair-mode — the new bond has been removed. Make sure only the target brush is awake near the bridge and try again.",
+      "unknown": "Unexpected error. Check the logs for details."
+    },
+    "abort": {
+      "no_eligible_bridges": "No ESP bridges available to add — every bridge already serves this brush, is bonded to a different brush, or no ESPHome bridge is online.",
+      "cannot_remove_last_bridge": "Only one bridge is configured. Remove the integration entry instead if you want to fully detach.",
+      "cannot_remove_primary_bridge": "Only added bridges can be removed here. To change the primary bridge, remove the integration entry and re-add it.",
+      "unknown": "Unexpected error. Check the logs for details."
     }
   },
   "entity": {

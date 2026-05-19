@@ -19,11 +19,44 @@ from .const import (
     TRANSPORT_ESP_BRIDGE,
     CONF_ESP_DEVICE_NAME,
     CONF_ESP_BRIDGE_ID,
+    CONF_ESP_BRIDGES,
     CHAR_SERVICE_MAP,
 )
 from .coordinator import PhilipsSonicareCoordinator
 from .helpers import esphome_service_id
-from .transport import BleakTransport, EspBridgeTransport
+from .transport import BleakTransport, EspBridgeTransport, MultiSourceTransport
+
+
+def get_configured_bridges(entry_data: dict) -> list[dict[str, str]]:
+    """Return the de-duplicated list of bridges serving an ESP-bridge entry.
+
+    The legacy single-bridge fields (CONF_ESP_DEVICE_NAME + CONF_ESP_BRIDGE_ID)
+    are treated as the primary/first bridge for backwards compatibility.
+    Additional bridges live under CONF_ESP_BRIDGES. Empty bridge_ids are normalised
+    to "" so dedup is exact.
+    """
+    bridges: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(device_name: str, bridge_id: str) -> None:
+        device_name = (device_name or "").strip()
+        bridge_id = (bridge_id or "").strip()
+        if not device_name:
+            return
+        key = (device_name, bridge_id)
+        if key in seen:
+            return
+        seen.add(key)
+        bridges.append({"device_name": device_name, "bridge_id": bridge_id})
+
+    _add(
+        entry_data.get(CONF_ESP_DEVICE_NAME, ""),
+        entry_data.get(CONF_ESP_BRIDGE_ID, ""),
+    )
+    for extra in entry_data.get(CONF_ESP_BRIDGES, []) or []:
+        if isinstance(extra, dict):
+            _add(extra.get("device_name", ""), extra.get("bridge_id", ""))
+    return bridges
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -94,9 +127,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     transport_type = entry.data.get(CONF_TRANSPORT_TYPE)
 
     if transport_type == TRANSPORT_ESP_BRIDGE:
-        esp_device_name = entry.data[CONF_ESP_DEVICE_NAME]
-        esp_bridge_id = entry.data.get(CONF_ESP_BRIDGE_ID, "")
-        transport = EspBridgeTransport(hass, address, esp_device_name, esp_bridge_id)
+        bridges = get_configured_bridges(entry.data)
+        if not bridges:
+            _LOGGER.error("ESP-bridge entry %s has no bridges configured", entry.entry_id)
+            return False
+        children = [
+            EspBridgeTransport(hass, address, b["device_name"], b["bridge_id"])
+            for b in bridges
+        ]
+        if len(children) == 1:
+            transport = children[0]
+        else:
+            transport = MultiSourceTransport(children)
+            _LOGGER.info(
+                "Multi-bridge mode: %d bridges serving %s",
+                len(children), address,
+            )
     else:
         transport = BleakTransport(hass, address)
 
@@ -302,6 +348,72 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
+async def _unpair_bridge(
+    hass: HomeAssistant,
+    esp_device_name: str,
+    bridge_id: str,
+    unique_id: str,
+) -> None:
+    """Issue ble_unpair on a single bridge and wait for the confirmation event.
+
+    Best-effort: offline bridges are skipped with a log message; service-call
+    failures and missing confirmations are logged but do not raise — callers
+    must not let bond cleanup block entry removal.
+    """
+    svc_name = f"{esp_device_name}_ble_unpair"
+    if bridge_id:
+        svc_name += f"_{bridge_id}"
+
+    if not hass.services.has_service("esphome", svc_name):
+        _LOGGER.info(
+            "ESP bridge %s offline at remove time — skipping ble_unpair "
+            "(bond on bridge stays)",
+            esp_device_name,
+        )
+        return
+
+    unpair_done = asyncio.Event()
+
+    @callback
+    def _on_status(event) -> None:
+        data = event.data
+        if data.get("status") != "unpaired":
+            return
+        if data.get("bridge_id", "") != bridge_id:
+            return
+        unpair_done.set()
+
+    unsub = hass.bus.async_listen(
+        "esphome.philips_sonicare_ble_status", _on_status
+    )
+
+    try:
+        await hass.services.async_call(
+            "esphome", svc_name, {}, blocking=True,
+        )
+        try:
+            await asyncio.wait_for(unpair_done.wait(), timeout=4.0)
+            _LOGGER.info(
+                "Removed bond on ESP bridge %s for %s",
+                esp_device_name,
+                unique_id,
+            )
+        except asyncio.TimeoutError:
+            _LOGGER.warning(
+                "ble_unpair on %s did not confirm within 4s — bridge may "
+                "need a manual reboot to recover",
+                esp_device_name,
+            )
+    except Exception as err:  # noqa: BLE001 — removal must not fail
+        _LOGGER.warning(
+            "ble_unpair on %s failed during entry removal: %s",
+            esp_device_name,
+            err,
+        )
+    finally:
+        unsub()
+
+
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Release the device-side bond when the entry is permanently removed.
 
@@ -326,69 +438,17 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     transport = entry.data.get(CONF_TRANSPORT_TYPE)
 
     if transport == TRANSPORT_ESP_BRIDGE:
-        esp_device_name = entry.data.get(CONF_ESP_DEVICE_NAME)
-        if not esp_device_name:
+        bridges = get_configured_bridges(entry.data)
+        if not bridges:
             return
-        esp_device_name = esphome_service_id(esp_device_name)
-        bridge_id = entry.data.get(CONF_ESP_BRIDGE_ID, "")
-
-        svc_name = f"{esp_device_name}_ble_unpair"
-        if bridge_id:
-            svc_name += f"_{bridge_id}"
-
-        if not hass.services.has_service("esphome", svc_name):
-            _LOGGER.info(
-                "ESP bridge %s offline at remove time — skipping ble_unpair "
-                "(bond on bridge stays)",
-                esp_device_name,
+        unique_id = entry.unique_id or entry.data.get(CONF_ADDRESS, "<unknown>")
+        for b in bridges:
+            await _unpair_bridge(
+                hass,
+                esphome_service_id(b["device_name"]),
+                b["bridge_id"],
+                unique_id,
             )
-            return
-
-        # Listen for the bridge's `unpaired` confirmation before returning.
-        # Bridge v1.3.2+ defers the event by ~2 s so the BLE stack can settle;
-        # we wait up to 4 s. If the event doesn't arrive the bridge may have
-        # wedged and need a manual reboot — log a warning, don't block the
-        # entry removal (HA deletes the entry regardless of what we return).
-        unpair_done = asyncio.Event()
-
-        @callback
-        def _on_status(event) -> None:
-            data = event.data
-            if data.get("status") != "unpaired":
-                return
-            if data.get("bridge_id", "") != bridge_id:
-                return
-            unpair_done.set()
-
-        unsub = hass.bus.async_listen(
-            "esphome.philips_sonicare_ble_status", _on_status
-        )
-
-        try:
-            await hass.services.async_call(
-                "esphome", svc_name, {}, blocking=True,
-            )
-            try:
-                await asyncio.wait_for(unpair_done.wait(), timeout=4.0)
-                _LOGGER.info(
-                    "Removed bond on ESP bridge %s for %s",
-                    esp_device_name,
-                    entry.unique_id or entry.data.get(CONF_ADDRESS, "<unknown>"),
-                )
-            except asyncio.TimeoutError:
-                _LOGGER.warning(
-                    "ble_unpair on %s did not confirm within 4s — bridge may "
-                    "need a manual reboot to recover",
-                    esp_device_name,
-                )
-        except Exception as err:  # noqa: BLE001 — removal must not fail
-            _LOGGER.warning(
-                "ble_unpair on %s failed during entry removal: %s",
-                esp_device_name,
-                err,
-            )
-        finally:
-            unsub()
         return
 
     # Direct BLE — release host-side BlueZ bond.

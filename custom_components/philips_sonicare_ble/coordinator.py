@@ -23,7 +23,7 @@ try:
 except ImportError:
     HAS_DBUS_FAST = False
 
-from .transport import BleakTransport, EspBridgeTransport, SonicareTransport
+from .transport import SonicareTransport
 from .exceptions import TransportError
 from .const import (
     DOMAIN,
@@ -473,7 +473,7 @@ class PhilipsSonicareCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if (
                         self.transport.is_connected
                         and self._live_setup_done
-                        and isinstance(self.transport, EspBridgeTransport)
+                        and self._is_esp_bridge
                         and self.transport.needs_resubscribe
                     ):
                         _LOGGER.info("ESP bridge requires resubscription")
@@ -606,7 +606,7 @@ class PhilipsSonicareCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             try:
                 while self.transport.is_connected:
                     if (
-                        isinstance(self.transport, EspBridgeTransport)
+                        self._is_esp_bridge
                         and self.transport.needs_resubscribe
                     ):
                         self.transport.acknowledge_resubscribe()
@@ -656,7 +656,8 @@ class PhilipsSonicareCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _check_bridge_version(self) -> None:
         """Create or clear a HA repair issue if the ESP bridge firmware is outdated."""
-        assert isinstance(self.transport, EspBridgeTransport)
+        if not self._is_esp_bridge:
+            return
         version = self.transport.bridge_version
         if not version:
             return

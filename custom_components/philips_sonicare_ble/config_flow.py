@@ -15,7 +15,7 @@ from homeassistant.components.bluetooth import (
 )
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, OptionsFlow
 from homeassistant.const import CONF_ADDRESS
-from homeassistant.core import Event, callback
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.data_entry_flow import AbortFlow, FlowResult
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 from homeassistant.helpers.selector import (
@@ -34,6 +34,7 @@ from .const import (
     CONF_TRANSPORT_TYPE,
     CONF_ESP_DEVICE_NAME,
     CONF_ESP_BRIDGE_ID,
+    CONF_ESP_BRIDGES,
     CONF_NOTIFY_THROTTLE,
     CONF_SENSOR_PRESSURE,
     CONF_SENSOR_TEMPERATURE,
@@ -157,6 +158,73 @@ SERVICE_PROBE_CHARS: dict[str, str] = {
     SVC_DIAGNOSTIC: "477ea600-a260-11e4-ae37-0002a5d54310",  # CHAR_ERROR_PERSISTENT
     SVC_EXTENDED: "477ea600-a260-11e4-ae37-0002a5d54420",   # CHAR_SETTINGS
 }
+
+
+def detect_esp_bridge_ids(hass: HomeAssistant, esp_device_name: str) -> list[str]:
+    """Detect available device_id suffixes on an ESP bridge."""
+    if hass.services.has_service("esphome", f"{esp_device_name}_ble_read_char"):
+        return [""]
+    esphome_services = hass.services.async_services().get("esphome", {})
+    prefix = f"{esp_device_name}_ble_read_char_"
+    return [
+        svc_name[len(prefix):]
+        for svc_name in esphome_services
+        if svc_name.startswith(prefix)
+    ]
+
+
+async def probe_bridge_info(
+    hass: HomeAssistant,
+    esp_device_name: str,
+    bridge_id: str,
+    timeout: float = 3.0,
+) -> dict[str, str] | None:
+    """Probe a single bridge via ble_get_info.
+
+    Returns the info-event payload, or ``None`` if the call timed out or
+    no Sonicare-bridge response was received. Listening on
+    ``philips_sonicare_ble_status`` disambiguates from a philips_shaver
+    bridge that happens to share service names.
+    """
+    svc_name = f"{esp_device_name}_ble_get_info"
+    if bridge_id:
+        svc_name += f"_{bridge_id}"
+    if not hass.services.has_service("esphome", svc_name):
+        return None
+
+    info_future: asyncio.Future[dict[str, str]] = hass.loop.create_future()
+
+    @callback
+    def _on_status(event: Event) -> None:
+        if (event.data.get("status") == "info"
+                and event.data.get("bridge_id", "") == bridge_id
+                and not info_future.done()):
+            info_future.set_result(dict(event.data))
+
+    unsub = hass.bus.async_listen(
+        "esphome.philips_sonicare_ble_status", _on_status
+    )
+    try:
+        await hass.services.async_call(
+            "esphome", svc_name, {}, blocking=True
+        )
+        return await asyncio.wait_for(info_future, timeout=timeout)
+    except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+        return None
+    finally:
+        unsub()
+
+
+async def probe_sonicare_bridges(
+    hass: HomeAssistant,
+    esp_device_name: str,
+    bridge_ids: list[str],
+) -> list[tuple[str, dict[str, str]]]:
+    """Probe all bridge_ids on an ESP in parallel; keep responders only."""
+    results = await asyncio.gather(
+        *(probe_bridge_info(hass, esp_device_name, did) for did in bridge_ids)
+    )
+    return [(did, info) for did, info in zip(bridge_ids, results) if info is not None]
 
 
 class PhilipsSonicareConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -766,66 +834,17 @@ class PhilipsSonicareConfigFlow(ConfigFlow, domain=DOMAIN):
         return options
 
     def _detect_esp_bridge_ids(self, esp_device_name: str) -> list[str]:
-        """Detect available device_id suffixes on an ESP bridge."""
-        # Single device (no suffix)
-        if self.hass.services.has_service("esphome", f"{esp_device_name}_ble_read_char"):
-            return [""]
-
-        # Multi-device: find suffixed services
-        esphome_services = self.hass.services.async_services().get("esphome", {})
-        prefix = f"{esp_device_name}_ble_read_char_"
-        return [
-            svc_name[len(prefix):]
-            for svc_name in esphome_services
-            if svc_name.startswith(prefix)
-        ]
+        return detect_esp_bridge_ids(self.hass, esp_device_name)
 
     async def _probe_bridge_info(
         self, esp_device_name: str, bridge_id: str, timeout: float = 3.0,
     ) -> dict[str, str] | None:
-        """Probe a single bridge via ble_get_info.
-
-        Returns the info-event payload, or ``None`` if the call timed out
-        or no Sonicare-bridge response was received. Listening on
-        ``philips_sonicare_ble_status`` is the disambiguator versus a
-        philips_shaver bridge that happens to share service names.
-        """
-        svc_name = f"{esp_device_name}_ble_get_info"
-        if bridge_id:
-            svc_name += f"_{bridge_id}"
-        if not self.hass.services.has_service("esphome", svc_name):
-            return None
-
-        info_future: asyncio.Future[dict[str, str]] = self.hass.loop.create_future()
-
-        @callback
-        def _on_status(event: Event) -> None:
-            if (event.data.get("status") == "info"
-                    and event.data.get("bridge_id", "") == bridge_id
-                    and not info_future.done()):
-                info_future.set_result(dict(event.data))
-
-        unsub = self.hass.bus.async_listen(
-            "esphome.philips_sonicare_ble_status", _on_status
-        )
-        try:
-            await self.hass.services.async_call(
-                "esphome", svc_name, {}, blocking=True
-            )
-            return await asyncio.wait_for(info_future, timeout=timeout)
-        except (asyncio.TimeoutError, Exception):  # noqa: BLE001 — broad catch is intentional
-            return None
-        finally:
-            unsub()
+        return await probe_bridge_info(self.hass, esp_device_name, bridge_id, timeout)
 
     async def _probe_sonicare_bridges(
         self, esp_device_name: str, bridge_ids: list[str],
     ) -> list[tuple[str, dict[str, str]]]:
-        """Probe all bridge_ids on an ESP in parallel; keep responders only."""
-        results = await asyncio.gather(
-            *(self._probe_bridge_info(esp_device_name, did) for did in bridge_ids)
-        )
-        return [(did, info) for did, info in zip(bridge_ids, results) if info is not None]
+        return await probe_sonicare_bridges(self.hass, esp_device_name, bridge_ids)
 
     # ------------------------------------------------------------------
     # Discovery flow
@@ -1789,8 +1808,25 @@ class PhilipsSonicareOptionsFlow(OptionsFlow):
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         self._config_entry = config_entry
+        self._pending_bridge: dict[str, str] | None = None
 
     async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        is_esp = (
+            self._config_entry.data.get(CONF_TRANSPORT_TYPE) == TRANSPORT_ESP_BRIDGE
+        )
+        if not is_esp:
+            return await self.async_step_settings()
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=["settings", "add_bridge", "remove_bridge"],
+        )
+
+    # ------------------------------------------------------------------
+    # Sensor / throttle settings (existing options form)
+    # ------------------------------------------------------------------
+    async def async_step_settings(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         is_esp = (
@@ -1803,9 +1839,8 @@ class PhilipsSonicareOptionsFlow(OptionsFlow):
                 CONF_SENSOR_TEMPERATURE: user_input.get(CONF_SENSOR_TEMPERATURE, DEFAULT_SENSOR_TEMPERATURE),
                 CONF_SENSOR_GYROSCOPE: user_input.get(CONF_SENSOR_GYROSCOPE, DEFAULT_SENSOR_GYROSCOPE),
             }
-            if is_esp:
-                if CONF_NOTIFY_THROTTLE in user_input:
-                    data[CONF_NOTIFY_THROTTLE] = int(user_input[CONF_NOTIFY_THROTTLE])
+            if is_esp and CONF_NOTIFY_THROTTLE in user_input:
+                data[CONF_NOTIFY_THROTTLE] = int(user_input[CONF_NOTIFY_THROTTLE])
             return self.async_create_entry(title="", data=data)
 
         options = self._config_entry.options
@@ -1833,6 +1868,331 @@ class PhilipsSonicareOptionsFlow(OptionsFlow):
             )
 
         return self.async_show_form(
-            step_id="init",
+            step_id="settings",
             data_schema=vol.Schema(schema_fields),
         )
+
+    # ------------------------------------------------------------------
+    # Multi-bridge: add another bridge to this brush
+    # ------------------------------------------------------------------
+    def _current_bridge_keys(self) -> set[tuple[str, str]]:
+        """Return (device_name, bridge_id) pairs already configured for this entry."""
+        from . import get_configured_bridges
+        return {
+            (b["device_name"], b["bridge_id"])
+            for b in get_configured_bridges(self._config_entry.data)
+        }
+
+    async def _build_add_bridge_options(
+        self, brush_mac: str
+    ) -> tuple[list[SelectOptionDict], dict[str, dict[str, str]]]:
+        """Enumerate candidate bridges for the add flow.
+
+        Returns (UI options, info-by-key). The key is "<device_name>|<bridge_id>".
+        Candidates are bridges already configured on some entry NOT already
+        owning this brush — but excludes bridges that are bonded to a
+        different brush, and excludes bridges already on this entry.
+        """
+        already = self._current_bridge_keys()
+        brush_mac_upper = brush_mac.upper() if brush_mac else ""
+
+        options: list[SelectOptionDict] = []
+        info_by_key: dict[str, dict[str, str]] = {}
+
+        esphome_entries = self.hass.config_entries.async_entries("esphome")
+        for entry in esphome_entries:
+            device_name = entry.data.get("device_name")
+            if not device_name:
+                continue
+            device_name = esphome_service_id(device_name)
+            bridge_ids = detect_esp_bridge_ids(self.hass, device_name)
+            if not bridge_ids:
+                continue
+            sonicare = await probe_sonicare_bridges(self.hass, device_name, bridge_ids)
+            for did, info in sonicare:
+                if (device_name, did) in already:
+                    continue
+                # Reject bridges bonded to a different brush
+                mac = (info.get("mac", "") or "").upper()
+                identity = (info.get("identity_address", "") or "").upper()
+                bonded_mac = identity or mac
+                if (bonded_mac
+                        and bonded_mac != "00:00:00:00:00:00"
+                        and brush_mac_upper
+                        and bonded_mac != brush_mac_upper):
+                    # Bonded to a different brush — not eligible.
+                    continue
+                key = f"{device_name}|{did}"
+                info_by_key[key] = info
+                # Build a UI label
+                base = PhilipsSonicareConfigFlow._format_bridge_label(did, info)
+                label = f"{entry.title}: {base}"
+                options.append(SelectOptionDict(value=key, label=label))
+        return options, info_by_key
+
+    async def async_step_add_bridge(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Pick a bridge to add as an additional source for this brush."""
+        brush_mac = self._config_entry.unique_id or self._config_entry.data.get(
+            CONF_ADDRESS, ""
+        ) or ""
+
+        if user_input is not None:
+            key = user_input["bridge_key"]
+            device_name, _, bridge_id = key.partition("|")
+            self._pending_bridge = {
+                "device_name": device_name,
+                "bridge_id": bridge_id,
+            }
+            # Probe the chosen bridge fresh to decide pair vs add-directly
+            info = await probe_bridge_info(self.hass, device_name, bridge_id)
+            if info is None:
+                return self.async_show_form(
+                    step_id="add_bridge",
+                    data_schema=await self._add_bridge_schema(brush_mac),
+                    errors={"base": "cannot_connect"},
+                )
+            if info.get("pair_capable", "false") == "true":
+                return await self.async_step_add_bridge_pair()
+            mac = (info.get("mac", "") or "").upper()
+            identity = (info.get("identity_address", "") or "").upper()
+            bonded_mac = identity or mac
+            if (bonded_mac
+                    and bonded_mac != "00:00:00:00:00:00"
+                    and brush_mac.upper() == bonded_mac):
+                # Already bonded to our brush — just persist.
+                return await self._finalize_add_bridge()
+            return self.async_show_form(
+                step_id="add_bridge",
+                data_schema=await self._add_bridge_schema(brush_mac),
+                errors={"base": "bridge_bonded_to_other_brush"},
+            )
+
+        schema = await self._add_bridge_schema(brush_mac)
+        if schema is None:
+            return self.async_abort(reason="no_eligible_bridges")
+        return self.async_show_form(step_id="add_bridge", data_schema=schema)
+
+    async def _add_bridge_schema(self, brush_mac: str) -> vol.Schema | None:
+        options, _info = await self._build_add_bridge_options(brush_mac)
+        if not options:
+            return None
+        return vol.Schema(
+            {
+                vol.Required("bridge_key"): SelectSelector(
+                    SelectSelectorConfig(options=options)
+                ),
+            }
+        )
+
+    async def async_step_add_bridge_pair(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Arm pair-mode on the chosen bridge and wait for pair_complete."""
+        if self._pending_bridge is None:
+            return self.async_abort(reason="unknown")
+        device_name = self._pending_bridge["device_name"]
+        bridge_id = self._pending_bridge["bridge_id"]
+        brush_mac = (
+            self._config_entry.unique_id
+            or self._config_entry.data.get(CONF_ADDRESS, "")
+            or ""
+        ).upper()
+
+        if user_input is None:
+            target = f"{device_name} / {bridge_id}" if bridge_id else device_name
+            return self.async_show_form(
+                step_id="add_bridge_pair",
+                data_schema=vol.Schema({}),
+                description_placeholders={
+                    "device_name": device_name,
+                    "bridge_id": bridge_id,
+                    "target": target,
+                },
+            )
+
+        timeout_s = 60
+        pair_future: asyncio.Future[dict[str, str]] = self.hass.loop.create_future()
+
+        @callback
+        def _on_status(event: Event) -> None:
+            data = event.data
+            if data.get("bridge_id", "") != bridge_id:
+                return
+            status = data.get("status")
+            if status not in ("pair_complete", "pair_timeout"):
+                return
+            if not pair_future.done():
+                pair_future.set_result(dict(data))
+
+        unsub = self.hass.bus.async_listen(
+            "esphome.philips_sonicare_ble_status", _on_status
+        )
+        svc_name = f"{device_name}_ble_pair_mode"
+        if bridge_id:
+            svc_name += f"_{bridge_id}"
+
+        try:
+            try:
+                await self.hass.services.async_call(
+                    "esphome",
+                    svc_name,
+                    {"enabled": True, "timeout_s": str(timeout_s)},
+                    blocking=True,
+                )
+            except Exception as err:
+                _LOGGER.error("Failed to arm pair-mode on %s: %s", device_name, err)
+                return self.async_show_form(
+                    step_id="add_bridge_pair",
+                    data_schema=vol.Schema({}),
+                    errors={"base": "cannot_connect"},
+                )
+
+            try:
+                result = await asyncio.wait_for(pair_future, timeout=timeout_s + 5)
+            except asyncio.TimeoutError:
+                return self.async_show_form(
+                    step_id="add_bridge_pair",
+                    data_schema=vol.Schema({}),
+                    errors={"base": "pair_timeout"},
+                )
+        finally:
+            unsub()
+            if not pair_future.done():
+                try:
+                    await self.hass.services.async_call(
+                        "esphome", svc_name,
+                        {"enabled": False, "timeout_s": "0"},
+                        blocking=False,
+                    )
+                except Exception:
+                    _LOGGER.debug("Best-effort pair-mode cancel failed (ignoring)")
+
+        if result.get("status") == "pair_timeout":
+            return self.async_show_form(
+                step_id="add_bridge_pair",
+                data_schema=vol.Schema({}),
+                errors={"base": "pair_timeout"},
+            )
+
+        identity = (result.get("identity_address", "") or "").upper()
+        if not identity:
+            return self.async_show_form(
+                step_id="add_bridge_pair",
+                data_schema=vol.Schema({}),
+                errors={"base": "unknown"},
+            )
+        if brush_mac and identity != brush_mac:
+            # Bridge bonded with a different brush — reject and unpair.
+            _LOGGER.warning(
+                "Add-bridge pair completed with %s, expected %s — unpairing",
+                identity, brush_mac,
+            )
+            await _unpair_silently(self.hass, device_name, bridge_id)
+            return self.async_show_form(
+                step_id="add_bridge_pair",
+                data_schema=vol.Schema({}),
+                errors={"base": "paired_with_other_brush"},
+            )
+
+        return await self._finalize_add_bridge()
+
+    async def _finalize_add_bridge(self) -> FlowResult:
+        """Persist the pending bridge into CONF_ESP_BRIDGES and reload the entry."""
+        if self._pending_bridge is None:
+            return self.async_abort(reason="unknown")
+        data = dict(self._config_entry.data)
+        bridges = list(data.get(CONF_ESP_BRIDGES, []) or [])
+        bridges.append(dict(self._pending_bridge))
+        data[CONF_ESP_BRIDGES] = bridges
+        self.hass.config_entries.async_update_entry(self._config_entry, data=data)
+        await self.hass.config_entries.async_reload(self._config_entry.entry_id)
+        self._pending_bridge = None
+        # Empty options dict — no settings change.
+        return self.async_create_entry(title="", data=dict(self._config_entry.options))
+
+    # ------------------------------------------------------------------
+    # Multi-bridge: remove an existing bridge
+    # ------------------------------------------------------------------
+    async def async_step_remove_bridge(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Pick a configured bridge to unpair and remove."""
+        from . import get_configured_bridges, _unpair_bridge
+
+        bridges = get_configured_bridges(self._config_entry.data)
+        if len(bridges) <= 1:
+            return self.async_abort(reason="cannot_remove_last_bridge")
+
+        # The primary (legacy) bridge cannot be removed without rewriting
+        # the legacy fields — for now restrict removal to extras.
+        primary_key = (
+            self._config_entry.data.get(CONF_ESP_DEVICE_NAME, ""),
+            self._config_entry.data.get(CONF_ESP_BRIDGE_ID, ""),
+        )
+        removable = [b for b in bridges if (b["device_name"], b["bridge_id"]) != primary_key]
+        if not removable:
+            return self.async_abort(reason="cannot_remove_primary_bridge")
+
+        if user_input is not None:
+            key = user_input["bridge_key"]
+            device_name, _, bridge_id = key.partition("|")
+            unique_id = self._config_entry.unique_id or self._config_entry.data.get(
+                CONF_ADDRESS, "<unknown>"
+            )
+            await _unpair_bridge(
+                self.hass,
+                esphome_service_id(device_name),
+                bridge_id,
+                unique_id,
+            )
+            data = dict(self._config_entry.data)
+            data[CONF_ESP_BRIDGES] = [
+                b for b in (data.get(CONF_ESP_BRIDGES, []) or [])
+                if not (b.get("device_name") == device_name
+                        and (b.get("bridge_id", "") or "") == bridge_id)
+            ]
+            self.hass.config_entries.async_update_entry(self._config_entry, data=data)
+            await self.hass.config_entries.async_reload(self._config_entry.entry_id)
+            return self.async_create_entry(
+                title="", data=dict(self._config_entry.options)
+            )
+
+        options = [
+            SelectOptionDict(
+                value=f"{b['device_name']}|{b['bridge_id']}",
+                label=(
+                    f"{b['device_name']} / {b['bridge_id']}"
+                    if b["bridge_id"] else b["device_name"]
+                ),
+            )
+            for b in removable
+        ]
+        return self.async_show_form(
+            step_id="remove_bridge",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("bridge_key"): SelectSelector(
+                        SelectSelectorConfig(options=options)
+                    ),
+                }
+            ),
+        )
+
+
+async def _unpair_silently(
+    hass: HomeAssistant, esp_device_name: str, bridge_id: str
+) -> None:
+    """Fire-and-forget ble_unpair after a mis-pair, without waiting."""
+    svc_name = f"{esp_device_name}_ble_unpair"
+    if bridge_id:
+        svc_name += f"_{bridge_id}"
+    if not hass.services.has_service("esphome", svc_name):
+        return
+    try:
+        await hass.services.async_call(
+            "esphome", svc_name, {}, blocking=False,
+        )
+    except Exception:  # noqa: BLE001
+        pass
