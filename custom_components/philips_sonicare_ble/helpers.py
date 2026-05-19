@@ -14,3 +14,13 @@ def esphome_service_id(device_name: str) -> str:
     silently misses every device whose name contains a hyphen.
     """
     return device_name.replace("-", "_")
+
+
+def bridge_service_name(device_name: str, action: str, bridge_id: str = "") -> str:
+    """Build a per-bridge ESPHome service name (e.g. ``atom_lite_ble_unpair_kids``).
+
+    The ``device_name`` must already be in service-id form (run through
+    ``esphome_service_id`` if it came from user input or mDNS).
+    """
+    base = f"{device_name}_{action}"
+    return f"{base}_{bridge_id}" if bridge_id else base

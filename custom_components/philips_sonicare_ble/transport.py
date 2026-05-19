@@ -27,6 +27,7 @@ from homeassistant.helpers.event import async_track_time_interval
 
 from .const import CHAR_SERVICE_MAP
 from .exceptions import TransportError
+from .helpers import bridge_service_name
 
 _LOGGER = logging.getLogger(__name__)
 _RAW_LOGGER = logging.getLogger(__name__ + ".raw")
@@ -409,10 +410,11 @@ class EspBridgeTransport(SonicareTransport):
         return self._device_name if self._esp_alive else None
 
     def _svc_name(self, action: str) -> str:
-        base = f"{self._device_name}_{action}"
-        if self._esp_bridge_id:
-            return f"{base}_{self._esp_bridge_id}"
-        return base
+        return bridge_service_name(self._device_name, action, self._esp_bridge_id)
+
+    @property
+    def device_name(self) -> str:
+        return self._device_name
 
     @staticmethod
     def _get_service_uuid(char_uuid: str) -> str:
@@ -1026,7 +1028,7 @@ class MultiSourceTransport(SonicareTransport):
                 if isinstance(err, Exception):
                     _LOGGER.warning(
                         "Bridge %s failed to come up: %s",
-                        child._device_name, err,
+                        child.device_name, err,
                     )
 
     async def disconnect(self) -> None:
@@ -1118,20 +1120,19 @@ class MultiSourceTransport(SonicareTransport):
         re-issues them on connect, so the brush starts streaming the moment
         any bridge wins the next session — no late HA-side handoff.
         """
-        last_error: Exception | None = None
-        any_ok = False
-        for child in self._children:
-            try:
-                await child.subscribe(char_uuid, cb)
-                any_ok = True
-            except Exception as err:  # noqa: BLE001 — tolerate per-bridge failures
-                last_error = err
+        results = await asyncio.gather(
+            *(child.subscribe(char_uuid, cb) for child in self._children),
+            return_exceptions=True,
+        )
+        errors = [r for r in results if isinstance(r, Exception)]
+        for child, result in zip(self._children, results):
+            if isinstance(result, Exception):
                 _LOGGER.debug(
-                    "Subscribe to %s on %s failed (other bridges continue): %s",
-                    char_uuid, child._device_name, err,
+                    "Subscribe to %s on %s failed: %s",
+                    char_uuid, child.device_name, result,
                 )
-        if not any_ok and last_error is not None:
-            raise last_error
+        if len(errors) == len(self._children):
+            raise errors[0]
 
     async def unsubscribe(self, char_uuid: str) -> None:
         await asyncio.gather(
