@@ -17,11 +17,12 @@ esp32:
     sdkconfig_options:
       CONFIG_BT_GATTC_MAX_CACHE_CHAR: "160"    # default 40; Sonicare has ~45 attributes
       CONFIG_BT_GATTC_NOTIF_REG_MAX: "30"      # default 5; we subscribe to 11 chars per device
-      # Persist the discovered GATT DB to NVS, keyed by bonded peer identity.
-      # ESP-IDF defaults this OFF, which forces a full ~4s service-discovery
-      # round-trip on every reconnect. With it on, second-and-subsequent
-      # connects to the same brush hit the cache in tens of ms.
-      CONFIG_BT_GATTC_CACHE_NVS_FLASH: "y"
+      # NOTE: CONFIG_BT_GATTC_CACHE_NVS_FLASH stays at its ESP-IDF default (n).
+      # Enabling it would let bluedroid skip the ~4s service-discovery
+      # round-trip on reconnects, but ESP-IDF 5.5.x crashes inside
+      # bta_gattc_cache_save while serialising the Sonicare GATT DB to NVS
+      # (LoadProhibited at bta_gattc_cache.c:2118). Until that's fixed
+      # upstream the 4s SDP is unavoidable on every reconnect.
 
 logger:
   level: DEBUG
