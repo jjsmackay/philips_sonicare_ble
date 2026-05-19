@@ -83,50 +83,66 @@ def _get_coordinator(hass: HomeAssistant, entry_id: str | None):
     return first["coordinator"] if first else None
 
 
-def _async_link_via_esp_device(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Link the Sonicare device to its ESP32 bridge in the device registry."""
-    esp_device_name = entry.data[CONF_ESP_DEVICE_NAME]
+def _resolve_esp_device_id(hass: HomeAssistant, esp_device_name: str) -> str | None:
+    """Find the device-registry id of an ESPHome device by its service-id name."""
     dev_reg = dr.async_get(hass)
-
-    # Find the ESPHome config entry matching our bridge device name.
-    # ESPHome stores device_name in mDNS form (atom-lite); we store it
-    # in service-id form (atom_lite). Normalize the entry side and compare.
-    esp_mac: str | None = None
     target = esphome_service_id(esp_device_name)
     for esphome_entry in hass.config_entries.async_entries("esphome"):
         entry_name = esphome_service_id(esphome_entry.data.get("device_name", ""))
-        if entry_name == target:
-            esp_mac = esphome_entry.unique_id
-            break
+        if entry_name != target:
+            continue
+        esp_mac = esphome_entry.unique_id
+        if not esp_mac:
+            return None
+        esp_device = dev_reg.async_get_device(
+            connections={(dr.CONNECTION_NETWORK_MAC, esp_mac)}
+        )
+        return esp_device.id if esp_device else None
+    return None
 
-    if not esp_mac:
-        _LOGGER.debug("ESPHome config entry for '%s' not found", esp_device_name)
+
+def _async_link_via_esp_device(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Link the Sonicare device (and per-bridge sub-devices) to their ESPs.
+
+    The brush device is linked to the primary bridge's ESPHome device (it
+    only supports one via_device_id). Each per-bridge "Connection" sub-device
+    is linked to *its own* ESP, so the device tree in HA mirrors the
+    multi-bridge topology accurately.
+    """
+    from .entity import bridge_subdevice_id
+
+    dev_reg = dr.async_get(hass)
+    bridges = get_configured_bridges(entry.data)
+    if not bridges:
         return
+    primary = bridges[0]
+    primary_key = (primary["device_name"], primary["bridge_id"])
+    device_id = entry.data.get(CONF_ADDRESS) or primary["device_name"]
 
-    esp_device = dev_reg.async_get_device(
-        connections={(dr.CONNECTION_NETWORK_MAC, esp_mac)}
-    )
-    if not esp_device:
-        _LOGGER.debug("ESPHome device for '%s' not in registry", esp_device_name)
-        return
+    primary_esp_id = _resolve_esp_device_id(hass, primary["device_name"])
+    if primary_esp_id:
+        sonicare_device = dev_reg.async_get_device(
+            identifiers={(DOMAIN, device_id)}
+        )
+        if sonicare_device:
+            dev_reg.async_update_device(
+                sonicare_device.id, via_device_id=primary_esp_id
+            )
 
-    device_id = entry.data.get(CONF_ADDRESS) or esp_device_name
-
-    # Link Sonicare toothbrush device → ESPHome device
-    sonicare_device = dev_reg.async_get_device(
-        identifiers={(DOMAIN, device_id)}
-    )
-    if sonicare_device:
-        dev_reg.async_update_device(sonicare_device.id, via_device_id=esp_device.id)
-        _LOGGER.info("Linked Sonicare device to ESP bridge '%s'", esp_device_name)
-
-    # Link ESP Bridge sub-device → ESPHome device
-    bridge_device = dev_reg.async_get_device(
-        identifiers={(DOMAIN, f"{device_id}_bridge")}
-    )
-    if bridge_device:
-        dev_reg.async_update_device(bridge_device.id, via_device_id=esp_device.id)
-        _LOGGER.info("Linked Bridge sub-device to ESP '%s'", esp_device_name)
+    # Per-bridge Connection sub-devices, including primary's `_bridge`.
+    for bridge in bridges:
+        esp_device_id = _resolve_esp_device_id(hass, bridge["device_name"])
+        if not esp_device_id:
+            _LOGGER.debug(
+                "ESPHome device for '%s' not in registry", bridge["device_name"]
+            )
+            continue
+        sub_id = bridge_subdevice_id(
+            device_id, bridge["device_name"], bridge["bridge_id"], primary_key
+        )
+        sub_device = dev_reg.async_get_device(identifiers={(DOMAIN, sub_id)})
+        if sub_device:
+            dev_reg.async_update_device(sub_device.id, via_device_id=esp_device_id)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

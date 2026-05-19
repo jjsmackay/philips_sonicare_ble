@@ -12,7 +12,40 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 
 from .coordinator import PhilipsSonicareCoordinator
-from .const import DOMAIN, CONF_ADDRESS, CONF_TRANSPORT_TYPE, TRANSPORT_ESP_BRIDGE, CONF_ESP_DEVICE_NAME
+from .const import (
+    CONF_ADDRESS,
+    CONF_ESP_BRIDGE_ID,
+    CONF_ESP_DEVICE_NAME,
+    CONF_TRANSPORT_TYPE,
+    DOMAIN,
+    TRANSPORT_ESP_BRIDGE,
+)
+
+
+def bridge_subdevice_id(
+    device_id: str, device_name: str, bridge_id: str, primary_key: tuple[str, str]
+) -> str:
+    """Identifier suffix for a per-bridge Connection sub-device.
+
+    The primary bridge (the legacy CONF_ESP_DEVICE_NAME / CONF_ESP_BRIDGE_ID
+    pair) keeps the historical ``_bridge`` identifier so existing single-bridge
+    installations don't need a migration. Extra bridges get a deterministic
+    suffix derived from their (device_name, bridge_id).
+    """
+    if (device_name, bridge_id) == primary_key:
+        return f"{device_id}_bridge"
+    safe = f"{device_name}_{bridge_id}".strip("_").replace("/", "_")
+    return f"{device_id}_bridge_{safe}"
+
+
+def bridge_subdevice_name(
+    device_name: str, bridge_id: str, primary_key: tuple[str, str]
+) -> str:
+    """Display name for a per-bridge Connection sub-device."""
+    if (device_name, bridge_id) == primary_key:
+        return "Connection"
+    label = device_name + (f" / {bridge_id}" if bridge_id else "")
+    return f"Connection ({label})"
 
 _LOGGER = logging.getLogger(__name__)
 

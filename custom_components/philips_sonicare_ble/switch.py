@@ -8,16 +8,24 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from homeassistant.helpers import device_registry as dr
+
 from .coordinator import PhilipsSonicareCoordinator
 from .const import (
     CONF_AUTO_CONNECT_OVERRIDES,
+    CONF_ESP_BRIDGE_ID,
+    CONF_ESP_DEVICE_NAME,
     CONF_TRANSPORT_TYPE,
     DOMAIN,
     TRANSPORT_ESP_BRIDGE,
     auto_connect_key,
     supports_settings_write,
 )
-from .entity import PhilipsSonicareEntity
+from .entity import (
+    PhilipsSonicareEntity,
+    bridge_subdevice_id,
+    bridge_subdevice_name,
+)
 from .transport import EspBridgeTransport, MultiSourceTransport
 
 _LOGGER = logging.getLogger(__name__)
@@ -43,9 +51,8 @@ async def async_setup_entry(
             if isinstance(transport, MultiSourceTransport)
             else [transport]
         )
-        multi = len(children) > 1
         entities.extend(
-            SonicareBridgeAutoConnectSwitch(coordinator, entry, child, multi)
+            SonicareBridgeAutoConnectSwitch(coordinator, entry, child)
             for child in children
         )
 
@@ -135,24 +142,32 @@ class SonicareBridgeAutoConnectSwitch(PhilipsSonicareEntity, SwitchEntity):
 
     _attr_entity_category = EntityCategory.CONFIG
     _attr_icon = "mdi:link-variant"
+    _attr_translation_key = "auto_connect"
 
     def __init__(
         self,
         coordinator: PhilipsSonicareCoordinator,
         entry: ConfigEntry,
         child: EspBridgeTransport,
-        multi: bool,
     ) -> None:
         super().__init__(coordinator, entry)
         self._child = child
         self._key = auto_connect_key(child.device_name, child.bridge_id)
-        suffix = f"_{self._key.replace('|', '_')}" if multi else ""
-        self._attr_unique_id = f"{self._device_id}_auto_connect{suffix}"
-        self._attr_translation_key = "auto_connect"
-        if multi:
-            label = child.device_name + (f" / {child.bridge_id}" if child.bridge_id else "")
-            self._attr_name = f"Auto Connect — {label}"
-            self._attr_has_entity_name = False
+        primary_key = (
+            entry.data.get(CONF_ESP_DEVICE_NAME, ""),
+            entry.data.get(CONF_ESP_BRIDGE_ID, ""),
+        )
+        sub_id = bridge_subdevice_id(
+            self._device_id, child.device_name, child.bridge_id, primary_key
+        )
+        self._attr_unique_id = f"{sub_id}_auto_connect"
+        self._attr_device_info = dr.DeviceInfo(
+            identifiers={(DOMAIN, sub_id)},
+            manufacturer="Espressif",
+            name=bridge_subdevice_name(
+                child.device_name, child.bridge_id, primary_key
+            ),
+        )
         # Default state until the first info event populates child.auto_connect
         self._attr_is_on = True
 
