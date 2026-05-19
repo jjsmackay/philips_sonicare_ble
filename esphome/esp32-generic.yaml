@@ -1,11 +1,16 @@
 esphome:
   name: esp32-ble-bridge
   friendly_name: "ESP32 BLE Bridge"
-  # Uncomment to enable bluetooth_proxy (requires bluedroid_null_fix.py
-  # in your ESPHome config directory — see bottom of this file):
-  # platformio_options:
-  #   extra_scripts:
-  #     - pre:/config/esphome/bluedroid_null_fix.py
+  # Required: bluedroid_null_fix.py patches ESP-IDF 5.5's bluedroid GATT
+  # cache code to add the NULL pointer checks from upstream commit d4f3517.
+  # Without it, ``CONFIG_BT_GATTC_CACHE_NVS_FLASH=y`` (which we set below
+  # to skip the 4s SDP on reconnect) crashes the ESP inside
+  # bta_gattc_cache_save with a LoadProhibited fault. Also covers the
+  # same NULL deref hit when running bluetooth_proxy alongside the bridge.
+  # Place the script next to this YAML in your ESPHome config dir.
+  platformio_options:
+    extra_scripts:
+      - pre:/config/esphome/bluedroid_null_fix.py
 
 # ESP-IDF is required (not Arduino) because Bluedroid's notification limit
 # is only configurable via sdkconfig.  Arduino uses precompiled libbt.a with
@@ -17,12 +22,12 @@ esp32:
     sdkconfig_options:
       CONFIG_BT_GATTC_MAX_CACHE_CHAR: "80"    # default 40; Sonicare has ~45 attributes
       CONFIG_BT_GATTC_NOTIF_REG_MAX: "20"     # default 5; we subscribe to 11 chars
-      # NOTE: CONFIG_BT_GATTC_CACHE_NVS_FLASH stays at its ESP-IDF default (n).
-      # Enabling it would let bluedroid skip the ~4s service-discovery
-      # round-trip on reconnects, but ESP-IDF 5.5.x crashes inside
-      # bta_gattc_cache_save while serialising the Sonicare GATT DB to NVS
-      # (LoadProhibited at bta_gattc_cache.c:2118). Until that's fixed
-      # upstream the 4s SDP is unavoidable on every reconnect.
+      # Persist discovered GATT DB to NVS keyed by bonded peer identity.
+      # First connect still does a full ~4s SDP; subsequent reconnects to
+      # the same brush hit the cache in tens of ms. Requires the
+      # bluedroid_null_fix.py pre-script above to dodge an ESP-IDF 5.5 crash
+      # inside bta_gattc_cache_save.
+      CONFIG_BT_GATTC_CACHE_NVS_FLASH: "y"
 
 logger:
   level: DEBUG
@@ -109,14 +114,11 @@ philips_sonicare:
 #     pin: GPIO2
 
 # --- Bluetooth Proxy (optional) ---
-# bluetooth_proxy requires a workaround for ESP-IDF bug
-# https://github.com/esphome/esphome/issues/15783
-#
-# To enable, uncomment bluetooth_proxy below AND add the pre-build
-# patch to esphome: platformio_options (see top of this file).
-# The patch fixes a NULL pointer crash in the Bluedroid BLE stack
-# that occurs during GATT service discovery when bluetooth_proxy
-# registers multiple GATT client interfaces.
+# The bluedroid_null_fix.py patch wired up at the top of this file already
+# covers the NULL-pointer crash that affected bluetooth_proxy coexistence
+# (https://github.com/esphome/esphome/issues/15783) — same patch we use to
+# make CONFIG_BT_GATTC_CACHE_NVS_FLASH safe. So uncommenting the block
+# below is now a one-liner.
 #
 # bluetooth_proxy:
 #   active: true
