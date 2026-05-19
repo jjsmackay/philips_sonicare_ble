@@ -43,7 +43,6 @@ from .entity import (
     PhilipsSonicareEntity,
     PhilipsBrushHeadEntity,
     PhilipsConnectionEntity,
-    entry_primary_bridge_key,
     esp_bridge_children,
     per_bridge_device_info,
     per_bridge_unique_id,
@@ -165,22 +164,23 @@ async def async_setup_entry(
 
     # Per-bridge Connection sub-device sensors (one set per configured bridge)
     if is_esp_bridge:
-        primary_key = entry_primary_bridge_key(entry)
-        for child in esp_bridge_children(coordinator.transport):
+        children = esp_bridge_children(coordinator.transport)
+        count = len(children)
+        for child in children:
             entities.append(
-                SonicareBridgeVersionSensor(coordinator, entry, child, primary_key)
+                SonicareBridgeVersionSensor(coordinator, entry, child, count)
             )
             entities.append(
-                SonicareBridgeBootTimeSensor(coordinator, entry, child, primary_key)
+                SonicareBridgeBootTimeSensor(coordinator, entry, child, count)
             )
             entities.append(
-                SonicareBridgeAdapterSensor(coordinator, entry, child, primary_key)
+                SonicareBridgeAdapterSensor(coordinator, entry, child, count)
             )
             entities.append(
-                SonicareBridgeAdapterTypeSensor(coordinator, entry, child, primary_key)
+                SonicareBridgeAdapterTypeSensor(coordinator, entry, child, count)
             )
             entities.append(
-                SonicareBridgeLastSeenSensor(coordinator, entry, child, primary_key)
+                SonicareBridgeLastSeenSensor(coordinator, entry, child, count)
             )
 
     async_add_entities(entities)
@@ -1140,15 +1140,15 @@ class SonicareBridgeVersionSensor(PhilipsSonicareEntity, SensorEntity):
         coordinator: PhilipsSonicareCoordinator,
         entry: ConfigEntry,
         child: EspBridgeTransport,
-        primary_key: tuple[str, str],
+        count: int,
     ) -> None:
         super().__init__(coordinator, entry)
         self._child = child
         self._attr_unique_id = per_bridge_unique_id(
-            self._device_id, child, primary_key, "bridge_version"
+            self._device_id, child, "bridge_version"
         )
         self._attr_device_info = per_bridge_device_info(
-            self._device_id, child, primary_key
+            self._device_id, child, count
         )
 
     @property
@@ -1176,15 +1176,15 @@ class SonicareBridgeBootTimeSensor(PhilipsSonicareEntity, SensorEntity):
         coordinator: PhilipsSonicareCoordinator,
         entry: ConfigEntry,
         child: EspBridgeTransport,
-        primary_key: tuple[str, str],
+        count: int,
     ) -> None:
         super().__init__(coordinator, entry)
         self._child = child
         self._attr_unique_id = per_bridge_unique_id(
-            self._device_id, child, primary_key, "bridge_boot_time"
+            self._device_id, child, "bridge_boot_time"
         )
         self._attr_device_info = per_bridge_device_info(
-            self._device_id, child, primary_key
+            self._device_id, child, count
         )
 
     @property
@@ -1211,15 +1211,15 @@ class SonicareBridgeAdapterSensor(PhilipsSonicareEntity, SensorEntity):
         coordinator: PhilipsSonicareCoordinator,
         entry: ConfigEntry,
         child: EspBridgeTransport,
-        primary_key: tuple[str, str],
+        count: int,
     ) -> None:
         super().__init__(coordinator, entry)
         self._child = child
         self._attr_unique_id = per_bridge_unique_id(
-            self._device_id, child, primary_key, "adapter"
+            self._device_id, child, "adapter"
         )
         self._attr_device_info = per_bridge_device_info(
-            self._device_id, child, primary_key
+            self._device_id, child, count
         )
 
     @property
@@ -1249,15 +1249,15 @@ class SonicareBridgeAdapterTypeSensor(PhilipsSonicareEntity, SensorEntity):
         coordinator: PhilipsSonicareCoordinator,
         entry: ConfigEntry,
         child: EspBridgeTransport,
-        primary_key: tuple[str, str],
+        count: int,
     ) -> None:
         super().__init__(coordinator, entry)
         self._child = child
         self._attr_unique_id = per_bridge_unique_id(
-            self._device_id, child, primary_key, "adapter_type"
+            self._device_id, child, "adapter_type"
         )
         self._attr_device_info = per_bridge_device_info(
-            self._device_id, child, primary_key
+            self._device_id, child, count
         )
 
     @property
@@ -1288,15 +1288,15 @@ class SonicareBridgeLastSeenSensor(PhilipsSonicareEntity, SensorEntity):
         coordinator: PhilipsSonicareCoordinator,
         entry: ConfigEntry,
         child: EspBridgeTransport,
-        primary_key: tuple[str, str],
+        count: int,
     ) -> None:
         super().__init__(coordinator, entry)
         self._child = child
         self._attr_unique_id = per_bridge_unique_id(
-            self._device_id, child, primary_key, "last_seen"
+            self._device_id, child, "last_seen"
         )
         self._attr_device_info = per_bridge_device_info(
-            self._device_id, child, primary_key
+            self._device_id, child, count
         )
 
     @property

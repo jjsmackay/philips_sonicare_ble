@@ -327,7 +327,7 @@ async def run_pair_mode(
 class PhilipsSonicareConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Philips Sonicare BLE."""
 
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self) -> None:
         self._discovery_info: BluetoothServiceInfoBleak | None = None
@@ -2058,23 +2058,12 @@ class PhilipsSonicareOptionsFlow(OptionsFlow):
     async def async_step_remove_bridge(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Pick a configured bridge to unpair and remove."""
+        """Pick any configured bridge to unpair and remove."""
         from . import get_configured_bridges, _unpair_bridge
 
         bridges = get_configured_bridges(self._config_entry.data)
         if len(bridges) <= 1:
             return self.async_abort(reason="cannot_remove_last_bridge")
-
-        # Restrict removal to extras — the primary lives in the legacy
-        # CONF_ESP_DEVICE_NAME / CONF_ESP_BRIDGE_ID fields and rewriting those
-        # would change the entry's identity.
-        primary_key = (
-            self._config_entry.data.get(CONF_ESP_DEVICE_NAME, ""),
-            self._config_entry.data.get(CONF_ESP_BRIDGE_ID, ""),
-        )
-        removable = [b for b in bridges if (b["device_name"], b["bridge_id"]) != primary_key]
-        if not removable:
-            return self.async_abort(reason="cannot_remove_primary_bridge")
 
         if user_input is not None:
             key = user_input["bridge_key"]
@@ -2083,12 +2072,38 @@ class PhilipsSonicareOptionsFlow(OptionsFlow):
                 self.hass, esphome_service_id(device_name), bridge_id,
             )
             data = dict(self._config_entry.data)
-            data[CONF_ESP_BRIDGES] = [
-                b for b in (data.get(CONF_ESP_BRIDGES, []) or [])
-                if not (b.get("device_name") == device_name
-                        and (b.get("bridge_id", "") or "") == bridge_id)
+            remaining = [
+                b for b in bridges
+                if not (b["device_name"] == device_name
+                        and b["bridge_id"] == bridge_id)
             ]
-            return await self._persist_and_reload(data)
+            data[CONF_ESP_BRIDGES] = remaining
+            # Keep the legacy CONF_ESP_DEVICE_NAME / CONF_ESP_BRIDGE_ID
+            # fields in sync with the new head of the list so downstream
+            # readers (device-registry linker, esp_device_name fallback for
+            # _device_id) see a coherent state.
+            if remaining:
+                data[CONF_ESP_DEVICE_NAME] = remaining[0]["device_name"]
+                data[CONF_ESP_BRIDGE_ID] = remaining[0]["bridge_id"]
+            # Drop any auto-connect override for the removed bridge so it
+            # doesn't accumulate dead keys in options.
+            from .const import CONF_AUTO_CONNECT_OVERRIDES, auto_connect_key
+            removed_key = auto_connect_key(device_name, bridge_id)
+            overrides = dict(
+                self._config_entry.options.get(CONF_AUTO_CONNECT_OVERRIDES, {}) or {}
+            )
+            overrides.pop(removed_key, None)
+            new_options = {
+                **self._config_entry.options,
+                CONF_AUTO_CONNECT_OVERRIDES: overrides,
+            }
+            self.hass.config_entries.async_update_entry(
+                self._config_entry, data=data, options=new_options
+            )
+            await self.hass.config_entries.async_reload(self._config_entry.entry_id)
+            return self.async_create_entry(
+                title="", data=dict(self._config_entry.options)
+            )
 
         options = [
             SelectOptionDict(
@@ -2098,7 +2113,7 @@ class PhilipsSonicareOptionsFlow(OptionsFlow):
                     if b["bridge_id"] else b["device_name"]
                 ),
             )
-            for b in removable
+            for b in bridges
         ]
         return self.async_show_form(
             step_id="remove_bridge",

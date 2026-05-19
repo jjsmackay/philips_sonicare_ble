@@ -19,7 +19,6 @@ from .const import (
 )
 from .entity import (
     PhilipsSonicareEntity,
-    entry_primary_bridge_key,
     esp_bridge_children,
     per_bridge_device_info,
     per_bridge_unique_id,
@@ -43,10 +42,11 @@ async def async_setup_entry(
     entities: list = []
 
     if entry.data.get(CONF_TRANSPORT_TYPE) == TRANSPORT_ESP_BRIDGE:
-        primary_key = entry_primary_bridge_key(entry)
-        for child in esp_bridge_children(coordinator.transport):
+        children = esp_bridge_children(coordinator.transport)
+        count = len(children)
+        for child in children:
             entities.append(
-                SonicareBridgeAutoConnectSwitch(coordinator, entry, child, primary_key)
+                SonicareBridgeAutoConnectSwitch(coordinator, entry, child, count)
             )
 
     # Settings-bitmask switches only land on devices that accept the writes.
@@ -142,16 +142,16 @@ class SonicareBridgeAutoConnectSwitch(PhilipsSonicareEntity, SwitchEntity):
         coordinator: PhilipsSonicareCoordinator,
         entry: ConfigEntry,
         child: EspBridgeTransport,
-        primary_key: tuple[str, str],
+        count: int,
     ) -> None:
         super().__init__(coordinator, entry)
         self._child = child
         self._key = auto_connect_key(child.device_name, child.bridge_id)
         self._attr_unique_id = per_bridge_unique_id(
-            self._device_id, child, primary_key, "auto_connect"
+            self._device_id, child, "auto_connect"
         )
         self._attr_device_info = per_bridge_device_info(
-            self._device_id, child, primary_key
+            self._device_id, child, count
         )
         # Default state until the first info event populates child.auto_connect
         self._attr_is_on = True

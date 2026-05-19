@@ -22,58 +22,45 @@ from .const import (
 )
 
 
-def bridge_subdevice_id(
-    device_id: str, device_name: str, bridge_id: str, primary_key: tuple[str, str]
-) -> str:
-    """Identifier suffix for a per-bridge Connection sub-device.
+def bridge_subdevice_id(device_id: str, device_name: str, bridge_id: str) -> str:
+    """Identifier for a per-bridge Connection sub-device.
 
-    The primary bridge (the legacy CONF_ESP_DEVICE_NAME / CONF_ESP_BRIDGE_ID
-    pair) keeps the historical ``_bridge`` identifier so existing single-bridge
-    installations don't need a migration. Extra bridges get a deterministic
-    suffix derived from their (device_name, bridge_id).
+    Every bridge gets the same scheme — no primary special case. The shape is
+    ``{device_id}_bridge_<sanitised device_name>_<sanitised bridge_id>``.
     """
-    if (device_name, bridge_id) == primary_key:
-        return f"{device_id}_bridge"
     safe = f"{device_name}_{bridge_id}".strip("_").replace("/", "_")
     return f"{device_id}_bridge_{safe}"
 
 
-def bridge_subdevice_name(
-    device_name: str, bridge_id: str, primary_key: tuple[str, str]
-) -> str:
-    """Display name for a per-bridge Connection sub-device."""
-    if (device_name, bridge_id) == primary_key:
+def bridge_subdevice_name(device_name: str, bridge_id: str, count: int) -> str:
+    """Display name for a per-bridge Connection sub-device.
+
+    When only one bridge is configured we drop the label suffix so users with
+    a single ESP see the familiar "Connection" name instead of
+    "Connection (atom_lite)". Adding a second bridge re-renders both names
+    with their labels on the next entry reload.
+    """
+    if count <= 1:
         return "Connection"
     label = device_name + (f" / {bridge_id}" if bridge_id else "")
     return f"Connection ({label})"
 
 
-def per_bridge_device_info(
-    device_id: str, child, primary_key: tuple[str, str]
-) -> dr.DeviceInfo:
+def per_bridge_device_info(device_id: str, child, count: int) -> dr.DeviceInfo:
     """DeviceInfo pointing at the per-bridge Connection sub-device for ``child``."""
     return dr.DeviceInfo(
         identifiers={(
             DOMAIN,
-            bridge_subdevice_id(device_id, child.device_name, child.bridge_id, primary_key),
+            bridge_subdevice_id(device_id, child.device_name, child.bridge_id),
         )},
         manufacturer="Espressif",
-        name=bridge_subdevice_name(child.device_name, child.bridge_id, primary_key),
+        name=bridge_subdevice_name(child.device_name, child.bridge_id, count),
     )
 
 
-def per_bridge_unique_id(
-    device_id: str, child, primary_key: tuple[str, str], suffix: str
-) -> str:
-    """Unique-id for a per-bridge entity.
-
-    The primary bridge keeps the legacy ``{device_id}_{suffix}`` form so
-    existing single-bridge installations don't lose entity state on upgrade.
-    Extras get the sub-device id as a prefix so they don't collide.
-    """
-    if (child.device_name, child.bridge_id) == primary_key:
-        return f"{device_id}_{suffix}"
-    sub = bridge_subdevice_id(device_id, child.device_name, child.bridge_id, primary_key)
+def per_bridge_unique_id(device_id: str, child, suffix: str) -> str:
+    """Unique-id for a per-bridge entity — always sub-device-prefixed."""
+    sub = bridge_subdevice_id(device_id, child.device_name, child.bridge_id)
     return f"{sub}_{suffix}"
 
 
@@ -85,15 +72,6 @@ def esp_bridge_children(transport) -> list:
     if isinstance(transport, EspBridgeTransport):
         return [transport]
     return []
-
-
-def entry_primary_bridge_key(entry) -> tuple[str, str]:
-    """The (device_name, bridge_id) of the entry's primary bridge."""
-    from .const import CONF_ESP_BRIDGE_ID, CONF_ESP_DEVICE_NAME
-    return (
-        entry.data.get(CONF_ESP_DEVICE_NAME, ""),
-        entry.data.get(CONF_ESP_BRIDGE_ID, ""),
-    )
 
 _LOGGER = logging.getLogger(__name__)
 

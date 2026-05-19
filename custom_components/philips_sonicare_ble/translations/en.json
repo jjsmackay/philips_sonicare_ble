@@ -147,7 +147,6 @@
     "abort": {
       "no_eligible_bridges": "No ESP bridges available to add — every bridge already serves this brush, is bonded to a different brush, or no ESPHome bridge is online.",
       "cannot_remove_last_bridge": "Only one bridge is configured. Remove the integration entry instead if you want to fully detach.",
-      "cannot_remove_primary_bridge": "Only added bridges can be removed here. To change the primary bridge, remove the integration entry and re-add it.",
       "unknown": "Unexpected error. Check the logs for details."
     }
   },

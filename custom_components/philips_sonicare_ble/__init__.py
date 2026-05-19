@@ -10,7 +10,7 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse, callback
-from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 from .const import (
     DOMAIN,
@@ -104,10 +104,10 @@ def _resolve_esp_device_id(hass: HomeAssistant, esp_device_name: str) -> str | N
 def _async_link_via_esp_device(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Link the Sonicare device (and per-bridge sub-devices) to their ESPs.
 
-    The brush device is linked to the primary bridge's ESPHome device (it
-    only supports one via_device_id). Each per-bridge "Connection" sub-device
-    is linked to *its own* ESP, so the device tree in HA mirrors the
-    multi-bridge topology accurately.
+    The brush root device is linked to the first configured bridge's ESPHome
+    device (HA's ``via_device_id`` is singular). Each per-bridge "Connection"
+    sub-device is linked to *its own* ESP so the device tree mirrors the
+    multi-bridge topology.
     """
     from .entity import bridge_subdevice_id
 
@@ -115,21 +115,19 @@ def _async_link_via_esp_device(hass: HomeAssistant, entry: ConfigEntry) -> None:
     bridges = get_configured_bridges(entry.data)
     if not bridges:
         return
-    primary = bridges[0]
-    primary_key = (primary["device_name"], primary["bridge_id"])
-    device_id = entry.data.get(CONF_ADDRESS) or primary["device_name"]
+    first_device_name = bridges[0]["device_name"]
+    device_id = entry.data.get(CONF_ADDRESS) or first_device_name
 
-    primary_esp_id = _resolve_esp_device_id(hass, primary["device_name"])
-    if primary_esp_id:
+    first_esp_id = _resolve_esp_device_id(hass, first_device_name)
+    if first_esp_id:
         sonicare_device = dev_reg.async_get_device(
             identifiers={(DOMAIN, device_id)}
         )
         if sonicare_device:
             dev_reg.async_update_device(
-                sonicare_device.id, via_device_id=primary_esp_id
+                sonicare_device.id, via_device_id=first_esp_id
             )
 
-    # Per-bridge Connection sub-devices, including primary's `_bridge`.
     for bridge in bridges:
         esp_device_id = _resolve_esp_device_id(hass, bridge["device_name"])
         if not esp_device_id:
@@ -138,11 +136,116 @@ def _async_link_via_esp_device(hass: HomeAssistant, entry: ConfigEntry) -> None:
             )
             continue
         sub_id = bridge_subdevice_id(
-            device_id, bridge["device_name"], bridge["bridge_id"], primary_key
+            device_id, bridge["device_name"], bridge["bridge_id"]
         )
         sub_device = dev_reg.async_get_device(identifiers={(DOMAIN, sub_id)})
         if sub_device:
             dev_reg.async_update_device(sub_device.id, via_device_id=esp_device_id)
+
+
+# Suffixes that moved from the legacy `_bridge` sub-device to per-bridge
+# `_bridge_<key>` sub-devices in entry-version 2. Used by the v1→v2 entity
+# registry migration to rename existing unique-ids in-place so single-bridge
+# installations keep their entity state and history across the upgrade.
+_V2_MIGRATED_SUFFIXES = (
+    "bridge_version",
+    "bridge_boot_time",
+    "esp_bridge_alive",
+    "ble_connected",
+    "adapter",
+    "adapter_type",
+    "last_seen",
+)
+
+
+def _migrate_v1_to_v2_esp(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Rename the legacy `_bridge` sub-device + its entities to the v2 scheme.
+
+    v2 stops special-casing the first bridge. Every Connection sub-device gets
+    the same ``{device_id}_bridge_<key>`` identifier, and every per-bridge
+    entity's unique_id is sub-device-prefixed. For single-bridge entries that
+    existed pre-migration this means a one-time rename.
+    """
+    from .entity import bridge_subdevice_id
+
+    data = dict(entry.data)
+    legacy_device = data.get(CONF_ESP_DEVICE_NAME, "")
+    legacy_bid = data.get(CONF_ESP_BRIDGE_ID, "") or ""
+
+    # Ensure CONF_ESP_BRIDGES already contains the legacy bridge.
+    bridges = list(data.get(CONF_ESP_BRIDGES, []) or [])
+    if legacy_device and not any(
+        b.get("device_name") == legacy_device
+        and (b.get("bridge_id", "") or "") == legacy_bid
+        for b in bridges
+    ):
+        bridges.insert(0, {"device_name": legacy_device, "bridge_id": legacy_bid})
+        data[CONF_ESP_BRIDGES] = bridges
+        hass.config_entries.async_update_entry(entry, data=data)
+
+    if not legacy_device:
+        return
+
+    device_id = data.get(CONF_ADDRESS) or legacy_device
+    new_sub_id = bridge_subdevice_id(device_id, legacy_device, legacy_bid)
+
+    dev_reg = dr.async_get(hass)
+    old_device = dev_reg.async_get_device(
+        identifiers={(DOMAIN, f"{device_id}_bridge")}
+    )
+    if old_device:
+        new_identifiers = {
+            i for i in old_device.identifiers if i != (DOMAIN, f"{device_id}_bridge")
+        }
+        new_identifiers.add((DOMAIN, new_sub_id))
+        try:
+            dev_reg.async_update_device(
+                old_device.id, new_identifiers=new_identifiers
+            )
+            _LOGGER.info(
+                "Migrated bridge sub-device identifier %s_bridge → %s",
+                device_id, new_sub_id,
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Failed to migrate bridge sub-device: %s", err)
+
+    ent_reg = er.async_get(hass)
+    old_uids = {f"{device_id}_{s}": s for s in _V2_MIGRATED_SUFFIXES}
+    for registry_entry in list(er.async_entries_for_config_entry(ent_reg, entry.entry_id)):
+        suffix = old_uids.get(registry_entry.unique_id)
+        if suffix is None:
+            continue
+        new_uid = f"{new_sub_id}_{suffix}"
+        try:
+            ent_reg.async_update_entity(
+                registry_entry.entity_id, new_unique_id=new_uid
+            )
+            _LOGGER.info(
+                "Migrated %s unique_id %s → %s",
+                registry_entry.entity_id, registry_entry.unique_id, new_uid,
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning(
+                "Failed to migrate %s: %s", registry_entry.entity_id, err
+            )
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate config entries when VERSION changes.
+
+    v1 → v2: per-bridge Connection sub-devices stop special-casing the first
+    bridge. Single-bridge ESP entries need their `_bridge` device and the
+    seven moved entity unique_ids renamed to the new ``_bridge_<key>`` scheme.
+    """
+    if entry.version >= 2:
+        return True
+
+    if entry.data.get(CONF_TRANSPORT_TYPE) == TRANSPORT_ESP_BRIDGE:
+        _migrate_v1_to_v2_esp(hass, entry)
+
+    hass.config_entries.async_update_entry(entry, version=2)
+    _LOGGER.info("Migrated config entry %s to v2", entry.entry_id)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

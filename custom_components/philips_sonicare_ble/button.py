@@ -17,7 +17,6 @@ from .const import (
 from .coordinator import PhilipsSonicareCoordinator
 from .entity import (
     PhilipsSonicareEntity,
-    entry_primary_bridge_key,
     esp_bridge_children,
     per_bridge_device_info,
     per_bridge_unique_id,
@@ -34,10 +33,11 @@ async def async_setup_entry(
         return
 
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-    primary_key = entry_primary_bridge_key(entry)
+    children = esp_bridge_children(coordinator.transport)
+    count = len(children)
     async_add_entities(
-        SonicareBridgeDisconnectButton(coordinator, entry, child, primary_key)
-        for child in esp_bridge_children(coordinator.transport)
+        SonicareBridgeDisconnectButton(coordinator, entry, child, count)
+        for child in children
     )
 
 
@@ -58,15 +58,15 @@ class SonicareBridgeDisconnectButton(PhilipsSonicareEntity, ButtonEntity):
         coordinator: PhilipsSonicareCoordinator,
         entry: ConfigEntry,
         child: EspBridgeTransport,
-        primary_key: tuple[str, str],
+        count: int,
     ) -> None:
         super().__init__(coordinator, entry)
         self._child = child
         self._attr_unique_id = per_bridge_unique_id(
-            self._device_id, child, primary_key, "disconnect"
+            self._device_id, child, "disconnect"
         )
         self._attr_device_info = per_bridge_device_info(
-            self._device_id, child, primary_key
+            self._device_id, child, count
         )
 
     @property

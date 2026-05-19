@@ -15,7 +15,6 @@ from homeassistant.helpers.entity import EntityCategory
 from .coordinator import PhilipsSonicareCoordinator
 from .entity import (
     PhilipsSonicareEntity,
-    entry_primary_bridge_key,
     esp_bridge_children,
     per_bridge_device_info,
     per_bridge_unique_id,
@@ -45,13 +44,14 @@ async def async_setup_entry(
 
     # Per-bridge Connection sub-device sensors (one set per configured bridge)
     if entry.data.get(CONF_TRANSPORT_TYPE) == TRANSPORT_ESP_BRIDGE:
-        primary_key = entry_primary_bridge_key(entry)
-        for child in esp_bridge_children(coordinator.transport):
+        children = esp_bridge_children(coordinator.transport)
+        count = len(children)
+        for child in children:
             entities.append(
-                SonicareBleConnectedSensor(coordinator, entry, child, primary_key)
+                SonicareBleConnectedSensor(coordinator, entry, child, count)
             )
             entities.append(
-                SonicareBridgeAliveSensor(coordinator, entry, child, primary_key)
+                SonicareBridgeAliveSensor(coordinator, entry, child, count)
             )
 
     async_add_entities(entities)
@@ -150,15 +150,15 @@ class SonicareBridgeAliveSensor(PhilipsSonicareEntity, BinarySensorEntity):
         coordinator: PhilipsSonicareCoordinator,
         entry: ConfigEntry,
         child: EspBridgeTransport,
-        primary_key: tuple[str, str],
+        count: int,
     ) -> None:
         super().__init__(coordinator, entry)
         self._child = child
         self._attr_unique_id = per_bridge_unique_id(
-            self._device_id, child, primary_key, "esp_bridge_alive"
+            self._device_id, child, "esp_bridge_alive"
         )
         self._attr_device_info = per_bridge_device_info(
-            self._device_id, child, primary_key
+            self._device_id, child, count
         )
 
     @property
@@ -182,15 +182,15 @@ class SonicareBleConnectedSensor(PhilipsSonicareEntity, BinarySensorEntity):
         coordinator: PhilipsSonicareCoordinator,
         entry: ConfigEntry,
         child: EspBridgeTransport,
-        primary_key: tuple[str, str],
+        count: int,
     ) -> None:
         super().__init__(coordinator, entry)
         self._child = child
         self._attr_unique_id = per_bridge_unique_id(
-            self._device_id, child, primary_key, "ble_connected"
+            self._device_id, child, "ble_connected"
         )
         self._attr_device_info = per_bridge_device_info(
-            self._device_id, child, primary_key
+            self._device_id, child, count
         )
 
     @property
